@@ -237,6 +237,9 @@ int main(int argc, char *argv[]) {
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
 
+    const float OFFSET_SPEED = 10.0f;
+
+    double offset = 0.0f;
     double x_scale = 1.0f;
     double y_scale = 1.0f;
     bool filter = false;
@@ -252,11 +255,22 @@ int main(int argc, char *argv[]) {
             if (filter && filter_idx + 1 < cgroups_len) filter_idx++;
         }
 
-        if (IsKeyReleased(KEY_UP)) y_scale *= 2;
-        if (IsKeyReleased(KEY_DOWN)) y_scale /= 2;
+        if (IsKeyDown(KEY_LEFT)) {
+            offset -= 1.0f / x_scale / OFFSET_SPEED;
+            if (offset < 0.0f) offset = 0.0f;
+        }
+        if (IsKeyDown(KEY_RIGHT)) {
+            offset += 1.0f / x_scale / OFFSET_SPEED;
+            if (offset > 1.0f) offset = 1.0f;
+        }
 
-        if (IsKeyReleased(KEY_EQUAL)) x_scale /= 2;
-        if (IsKeyReleased(KEY_MINUS)) x_scale *= 2;
+        if (IsKeyReleased(KEY_UP)) y_scale /= 2;
+        if (IsKeyReleased(KEY_DOWN)) y_scale *= 2;
+
+        if (IsKeyReleased(KEY_EQUAL)) x_scale *= 2;
+        if (IsKeyReleased(KEY_MINUS)) {
+            if (x_scale > 1.0f) x_scale /= 2;
+        }
 
         double ts_per_px = (max_time_us - min_time_us) / INNER_WIDTH;
         double latency_per_px = (max_latency_us * y_scale - min_latency_us) / INNER_HEIGHT;
@@ -275,8 +289,10 @@ int main(int argc, char *argv[]) {
             for (size_t j = 0; j < entry.points_len; j++) {
                 Point point = entry.points[j];
 
-                int x = H_PADDING + round((point.time_us - min_time_us) / (ts_per_px * x_scale));
+                int x = H_PADDING + (round((point.time_us - min_time_us) / ts_per_px) - INNER_WIDTH * offset) * x_scale;
+                if (x > WIDTH - H_PADDING) break;
                 int y = HEIGHT - V_PADDING - round((point.latency_us - min_latency_us) / (latency_per_px * y_scale));
+                if (y < V_PADDING) y = V_PADDING;
 
                 DrawLine(px, py, x, y, entry.color);
 
