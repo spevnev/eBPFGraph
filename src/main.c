@@ -21,15 +21,35 @@ static const int V_PADDING = 25;
 #define INNER_WIDTH (WIDTH - 2 * H_PADDING)
 #define INNER_HEIGHT (HEIGHT - 2 * V_PADDING)
 
-static const char *TITLE = "eBPF Graph";
-
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
+static const Color FOREGROUND = {0xD8, 0xD8, 0xD8, 0xff};
+static const Color COLORS[] = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff}, {0x18, 0x18, 0xD8, 0xff},
+                               {0x18, 0xD8, 0xD8, 0xff}, {0xD8, 0x18, 0xD8, 0xff}, {0xD8, 0xD8, 0x18, 0xff}};
+#define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 typedef struct {
-    uint64_t ts;
+    uint64_t time_ns;
     int32_t cgroup;
-    uint32_t latency;
+    uint32_t latency_ns;
 } Entry;
+
+typedef struct {
+    uint64_t time_us;
+    uint32_t latency_us;
+} Point;
+
+typedef struct {
+    int32_t cgroup;
+    Color color;
+
+    uint64_t min_time_us;
+    uint64_t max_time_us;
+    uint32_t min_latency_us;
+    uint32_t max_latency_us;
+
+    size_t points_len;
+    Point *points;
+} Cgroup;
 
 static void usage(const char *program) {
     printf("usage: %s <filename>\n", program);
@@ -55,7 +75,7 @@ static const char *llong_field(long long *ret, const char *ch) {
 static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) {
     assert(ret_entries != NULL && ret_entries_len != NULL && fp != NULL);  // TODO: error vs assert
 
-    const int LINES = 186135;
+    const int LINES = 186134;
 
     size_t entries_len = LINES;
     Entry *entries = malloc(entries_len * sizeof(*entries));  // TODO: just mmap?
@@ -86,16 +106,16 @@ static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) 
         entry->cgroup = cgroup;
 
         // RUNQ_LATENCY
-        long long latency;
-        ch = llong_field(&latency, ch);
-        assert(0 <= latency && latency <= UINT32_MAX);
-        entry->latency = latency;
+        long long latency_ns;
+        ch = llong_field(&latency_ns, ch);
+        assert(0 <= latency_ns && latency_ns <= UINT32_MAX);
+        entry->latency_ns = latency_ns;
 
         // TS
-        long long ts;
-        ch = llong_field(&ts, ch);
-        assert(0 <= ts);
-        entry->ts = ts;
+        long long time_ns;
+        ch = llong_field(&time_ns, ch);
+        assert(0 <= time_ns);
+        entry->time_ns = time_ns;
 
         entry++;
     }
@@ -103,6 +123,64 @@ static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) 
 
     *ret_entries = entries;
     *ret_entries_len = entries_len;
+    return 0;
+}
+
+int process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, size_t entries_len) {
+    const int ENTRIES = 20;
+    const int POINTS = 180000;
+
+    size_t cgroups_len = ENTRIES;
+    Cgroup *cgroups = malloc(cgroups_len * sizeof(*cgroups));
+    size_t init_entries = 0;
+
+    for (size_t i = 0; i < cgroups_len; i++) {
+        cgroups[i].color = COLORS[i % COLORS_LEN];
+        cgroups[i].min_time_us = UINT64_MAX;
+        cgroups[i].max_time_us = 0;
+        cgroups[i].min_latency_us = UINT32_MAX;
+        cgroups[i].max_latency_us = 0;
+        cgroups[i].points_len = 0;
+        cgroups[i].points = malloc(POINTS * sizeof(*cgroups[i].points));
+    }
+
+    for (size_t i = 0; i < entries_len; i++) {
+        Cgroup *cgroup = NULL;
+        for (size_t j = 0; j < init_entries; j++) {
+            if (entries[i].cgroup == cgroups[j].cgroup) {
+                cgroup = &cgroups[j];
+                break;
+            }
+        }
+        if (cgroup == NULL) {
+            assert(init_entries + 1 < cgroups_len);
+            cgroup = &cgroups[init_entries++];
+            cgroup->cgroup = entries[i].cgroup;
+        }
+
+        uint64_t latency_us = entries[i].latency_ns / 1000;
+        uint32_t time_us = entries[i].time_ns / 1000;
+
+        if (time_us < cgroup->min_time_us) cgroup->min_time_us = time_us;
+        if (time_us > cgroup->max_time_us) cgroup->max_time_us = time_us;
+        if (latency_us < cgroup->min_latency_us) cgroup->min_latency_us = latency_us;
+        if (latency_us > cgroup->max_latency_us) cgroup->max_latency_us = latency_us;
+
+        // TODO: batch & average
+        cgroup->points[cgroup->points_len].latency_us = latency_us;
+        cgroup->points[cgroup->points_len].time_us = time_us;
+        cgroup->points_len++;
+    }
+
+    // TODO: reorder / make it "others"
+    const int MIN_POINTS = 1000;
+    for (size_t i = 0; i < cgroups_len; i++) {
+        if (cgroups[i].points_len < MIN_POINTS) cgroups[i].points_len = 0;
+    }
+    // TODO: remove/ignore cgroups with less than N points
+
+    *ret_cgroups = cgroups;
+    *ret_cgroups_len = cgroups_len;
     return 0;
 }
 
@@ -134,41 +212,77 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    Cgroup *cgroups;
+    size_t cgroups_len;
+    if (process_data(&cgroups, &cgroups_len, entries, entries_len) != 0) {
+        fprintf(stderr, "ERROR: unable to process data.\n");
+        return EXIT_FAILURE;
+    }
+    free(entries);
+
     fclose(fp);
 
-    uint64_t min_ts = entries[0].ts;
-    uint64_t max_ts = entries[entries_len - 1].ts;
-    double ts_per_px = (max_ts - min_ts) / INNER_WIDTH;
-
-    uint64_t min_latency = UINT64_MAX;
-    uint64_t max_latency = 0;
-    for (size_t i = 0; i < entries_len; i++) {
-        Entry entry = entries[i];
-        if (entry.latency < min_latency) min_latency = entry.latency;
-        if (entry.latency > max_latency) max_latency = entry.latency;
+    uint64_t min_time_us = UINT64_MAX;
+    uint64_t max_time_us = 0;
+    uint32_t min_latency_us = UINT32_MAX;
+    uint32_t max_latency_us = 0;
+    for (size_t i = 0; i < cgroups_len; i++) {
+        if (cgroups[i].min_time_us < min_time_us) min_time_us = cgroups[i].min_time_us;
+        if (cgroups[i].max_time_us > max_time_us) max_time_us = cgroups[i].max_time_us;
+        if (cgroups[i].min_latency_us < min_latency_us) min_latency_us = cgroups[i].min_latency_us;
+        if (cgroups[i].max_latency_us > max_latency_us) max_latency_us = cgroups[i].max_latency_us;
     }
-    double latency_per_px = (max_latency - min_latency) / INNER_HEIGHT;
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
 
+    double x_scale = 1.0f;
+    double y_scale = 1.0f;
+    bool filter = false;
+    size_t filter_idx = 0;
     while (!WindowShouldClose()) {
-        BeginDrawing();
+        if (IsKeyReleased(KEY_Q)) {
+            filter = !filter;
+        }
+        if (IsKeyReleased(KEY_W)) {
+            if (filter && filter_idx > 0) filter_idx--;
+        }
+        if (IsKeyReleased(KEY_E)) {
+            if (filter && filter_idx + 1 < cgroups_len) filter_idx++;
+        }
 
+        if (IsKeyReleased(KEY_UP)) y_scale *= 2;
+        if (IsKeyReleased(KEY_DOWN)) y_scale /= 2;
+
+        if (IsKeyReleased(KEY_EQUAL)) x_scale /= 2;
+        if (IsKeyReleased(KEY_MINUS)) x_scale *= 2;
+
+        double ts_per_px = (max_time_us - min_time_us) / INNER_WIDTH;
+        double latency_per_px = (max_latency_us * y_scale - min_latency_us) / INNER_HEIGHT;
+
+        BeginDrawing();
         ClearBackground(BACKGROUND);
 
-        int px = H_PADDING;
-        int py = V_PADDING;
-        for (size_t i = 0; i < entries_len; i++) {
-            Entry entry = entries[i];
-            int x = H_PADDING + round((entry.ts - min_ts) / ts_per_px);
-            int y = V_PADDING + INNER_HEIGHT - round((entry.latency - min_latency) / latency_per_px);
+        for (size_t i = 0; i < cgroups_len; i++) {
+            if (filter && i != filter_idx) continue;
 
-            DrawLine(px, py, x, y, RAYWHITE);
+            Cgroup entry = cgroups[i];
 
-            px = x;
-            py = y;
+            int px = H_PADDING;
+            int py = HEIGHT - V_PADDING;
+
+            for (size_t j = 0; j < entry.points_len; j++) {
+                Point point = entry.points[j];
+
+                int x = H_PADDING + round((point.time_us - min_time_us) / (ts_per_px * x_scale));
+                int y = HEIGHT - V_PADDING - round((point.latency_us - min_latency_us) / (latency_per_px * y_scale));
+
+                DrawLine(px, py, x, y, entry.color);
+
+                px = x;
+                py = y;
+            }
         }
 
         EndDrawing();
@@ -176,7 +290,8 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
-    free(entries);
+    for (size_t i = 0; i < cgroups_len; i++) free(cgroups[i].points);
+    free(cgroups);
 
     return EXIT_SUCCESS;
 }
