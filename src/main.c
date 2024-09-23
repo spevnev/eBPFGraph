@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <raylib.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,12 +14,19 @@
 // TODO: full screen?
 static const int WIDTH = 1080;
 static const int HEIGHT = 720;
+
+static const int H_PADDING = 50;
+static const int V_PADDING = 25;
+
+#define INNER_WIDTH (WIDTH - 2 * H_PADDING)
+#define INNER_HEIGHT (HEIGHT - 2 * V_PADDING)
+
 static const char *TITLE = "eBPF Graph";
 
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
 
 typedef struct {
-    uint64_t timestamp;
+    uint64_t ts;
     int32_t cgroup;
     uint32_t latency;
 } Entry;
@@ -28,6 +36,7 @@ static void usage(const char *program) {
 }
 
 static const char *skip_field(const char *ch) {
+    while (*ch == ' ' && *ch != '\0') ch++;
     while (*ch != ' ' && *ch != '\0') ch++;
     assert(*ch != '\0');
     return ch;
@@ -83,10 +92,10 @@ static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) 
         entry->latency = latency;
 
         // TS
-        long long timestamp;
-        ch = llong_field(&timestamp, ch);
-        assert(0 <= timestamp);
-        entry->timestamp = timestamp;
+        long long ts;
+        ch = llong_field(&ts, ch);
+        assert(0 <= ts);
+        entry->ts = ts;
 
         entry++;
     }
@@ -127,6 +136,19 @@ int main(int argc, char *argv[]) {
 
     fclose(fp);
 
+    uint64_t min_ts = entries[0].ts;
+    uint64_t max_ts = entries[entries_len - 1].ts;
+    double ts_per_px = (max_ts - min_ts) / INNER_WIDTH;
+
+    uint64_t min_latency = UINT64_MAX;
+    uint64_t max_latency = 0;
+    for (size_t i = 0; i < entries_len; i++) {
+        Entry entry = entries[i];
+        if (entry.latency < min_latency) min_latency = entry.latency;
+        if (entry.latency > max_latency) max_latency = entry.latency;
+    }
+    double latency_per_px = (max_latency - min_latency) / INNER_HEIGHT;
+
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
@@ -135,6 +157,19 @@ int main(int argc, char *argv[]) {
         BeginDrawing();
 
         ClearBackground(BACKGROUND);
+
+        int px = H_PADDING;
+        int py = V_PADDING;
+        for (size_t i = 0; i < entries_len; i++) {
+            Entry entry = entries[i];
+            int x = H_PADDING + round((entry.ts - min_ts) / ts_per_px);
+            int y = V_PADDING + INNER_HEIGHT - round((entry.latency - min_latency) / latency_per_px);
+
+            DrawLine(px, py, x, y, RAYWHITE);
+
+            px = x;
+            py = y;
+        }
 
         EndDrawing();
     }
