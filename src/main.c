@@ -16,15 +16,20 @@
 static const char *TITLE = "eBPF Graph";
 
 // Geometry
-static const int WIDTH = 1440;
-static const int HEIGHT = 1080;
+static const int WIDTH = 1600;
+static const int HEIGHT = 900;
 static const int H_PADDING = 60;
-static const int V_PADDING = 40;
+static const int T_PADDING = 70;
+static const int B_PADDING = 30;
 #define INNER_WIDTH (WIDTH - 2 * H_PADDING)
-#define INNER_HEIGHT (HEIGHT - 2 * V_PADDING)
+#define INNER_HEIGHT (HEIGHT - T_PADDING - B_PADDING)
 static const int GRID_SIZE = 60;
 static const int AXIS_FONT_SIZE = 10;
 static const int TEXT_MARGIN = 4;
+static const int LEGEND_COLOR_SIZE = 16;
+static const int LEGEND_COLOR_PADDING = 4;
+static const int LEGEND_FONT_SIZE = 16;
+static const int LEGEND_PADDING = 20;
 
 // Colors
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
@@ -247,6 +252,10 @@ int process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, 
     return 0;
 }
 
+Vector2 MeasureText2(const char *text, float font_size) {
+    return MeasureTextEx(GetFontDefault(), text, font_size, font_size / GetFontDefault().baseSize);
+}
+
 int main(int argc, char *argv[]) {
     if (RAYLIB_VERSION_MAJOR != 5) {
         fprintf(stderr, "ERROR: required raylib version is 5.y.z.\n");
@@ -354,21 +363,35 @@ int main(int argc, char *argv[]) {
         char buffer[256];
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
             int x = i * GRID_SIZE + H_PADDING;
-            DrawLine(x, V_PADDING, x, HEIGHT - V_PADDING, GRID_COLOR);
+            DrawLine(x, T_PADDING, x, HEIGHT - B_PADDING, GRID_COLOR);
 
             snprintf(buffer, 256, "%llu",
                      (long long unsigned) (min_time_us + ts_per_px * i * GRID_SIZE / x_scale
                                            + (max_time_us - min_time_us) * offset));
             int tw = MeasureText(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, x - tw / 2, HEIGHT - V_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
+            DrawText(buffer, x - tw / 2, HEIGHT - B_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
+
+            // TODO: add time
         }
         for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
-            int y = HEIGHT - V_PADDING - GRID_SIZE * i;
+            int y = HEIGHT - B_PADDING - GRID_SIZE * i;
             DrawLine(H_PADDING, y, WIDTH - H_PADDING, y, GRID_COLOR);
 
             snprintf(buffer, 256, "%d", (int) (latency_per_px * i * GRID_SIZE / y_scale));
-            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, H_PADDING - tw - TEXT_MARGIN, y, AXIS_FONT_SIZE, FOREGROUND);
+            Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, H_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
+        }
+
+        int w = H_PADDING;
+        for (size_t i = 0; i < cgroups_len; i++) {
+            DrawRectangle(w, (T_PADDING - LEGEND_COLOR_SIZE) / 2, LEGEND_COLOR_SIZE, LEGEND_COLOR_SIZE,
+                          cgroups[i].color);
+            w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
+
+            snprintf(buffer, 256, "%d", cgroups[i].cgroup);
+            Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
+            DrawText(buffer, w, (T_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups[i].color);
+            w += td.x + LEGEND_PADDING;
         }
 
         for (size_t i = 0; i < cgroups_len; i++) {
@@ -377,7 +400,7 @@ int main(int argc, char *argv[]) {
             Cgroup entry = cgroups[i];
 
             int px = H_PADDING;
-            int py = HEIGHT - V_PADDING;
+            int py = HEIGHT - B_PADDING;
 
             for (size_t j = 0; j < entry.points_len; j++) {
                 Point point = entry.points[j];
@@ -390,7 +413,7 @@ int main(int argc, char *argv[]) {
                 if (y < 0) y = 0;
 
                 x += H_PADDING;
-                y -= V_PADDING;
+                y -= B_PADDING;
 
                 DrawLine(px, py, x, y, entry.color);
 
