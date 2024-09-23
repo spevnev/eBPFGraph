@@ -16,16 +16,20 @@
 static const char *TITLE = "eBPF Graph";
 
 // Geometry
-static const int WIDTH = 1080;
-static const int HEIGHT = 720;
-static const int H_PADDING = 50;
-static const int V_PADDING = 25;
+static const int WIDTH = 1440;
+static const int HEIGHT = 1080;
+static const int H_PADDING = 60;
+static const int V_PADDING = 40;
 #define INNER_WIDTH (WIDTH - 2 * H_PADDING)
 #define INNER_HEIGHT (HEIGHT - 2 * V_PADDING)
+static const int GRID_SIZE = 60;
+static const int AXIS_FONT_SIZE = 10;
+static const int TEXT_MARGIN = 4;
 
 // Colors
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
 static const Color FOREGROUND = {0xD8, 0xD8, 0xD8, 0xff};
+static const Color GRID_COLOR = {0x33, 0x33, 0x33, 0xff};
 static const Color COLORS[] = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff}, {0x18, 0x18, 0xD8, 0xff},
                                {0x18, 0xD8, 0xD8, 0xff}, {0xD8, 0x18, 0xD8, 0xff}, {0xD8, 0xD8, 0x18, 0xff}};
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
@@ -34,9 +38,8 @@ static const Color COLORS[] = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff
 static const size_t CGROUP_MIN_POINTS = 500;
 
 // Controls
-static const float OFFSET_SPEED = 10.0f;
-static const float MIN_Y_SCALE = 0.01f;
-static const float Y_SCALE_SPEED = 1.08f;
+static const float OFFSET_SPEED = 20.0f;
+static const float Y_SCALE_SPEED = 1.05f;
 static const float X_SCALE_SPEED = 1.05f;
 
 // Memory
@@ -319,12 +322,12 @@ int main(int argc, char *argv[]) {
         }
 
         if (IsKeyDown(KEY_LEFT)) {
-            offset -= 1.0f / x_scale / OFFSET_SPEED;
+            offset -= 1.0f / (x_scale * OFFSET_SPEED);
             if (offset < 0.0f) offset = 0.0f;
         }
         if (IsKeyDown(KEY_RIGHT)) {
-            offset += 1.0f / x_scale / OFFSET_SPEED;
-            if (offset > 1.0f) offset = 1.0f;
+            offset += 1.0f / (OFFSET_SPEED * x_scale);
+            if (1.0f / x_scale + offset > 1.0f) offset = 1.0f - 1.0f / x_scale;
         }
 
         // TODO: double vs float
@@ -342,10 +345,31 @@ int main(int argc, char *argv[]) {
         if (IsKeyDown(KEY_MINUS)) {
             x_scale /= X_SCALE_SPEED;
             if (x_scale < 1.0f) x_scale = 1.0f;
+            if (1.0f / x_scale + offset > 1.0f) offset = 1.0f - 1.0f / x_scale;
         }
 
         BeginDrawing();
         ClearBackground(BACKGROUND);
+
+        char buffer[256];
+        for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
+            int x = i * GRID_SIZE + H_PADDING;
+            DrawLine(x, V_PADDING, x, HEIGHT - V_PADDING, GRID_COLOR);
+
+            snprintf(buffer, 256, "%llu",
+                     (long long unsigned) (min_time_us + ts_per_px * i * GRID_SIZE / x_scale
+                                           + (max_time_us - min_time_us) * offset));
+            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, x - tw / 2, HEIGHT - V_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
+        }
+        for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
+            int y = HEIGHT - V_PADDING - GRID_SIZE * i;
+            DrawLine(H_PADDING, y, WIDTH - H_PADDING, y, GRID_COLOR);
+
+            snprintf(buffer, 256, "%d", (int) (latency_per_px * i * GRID_SIZE / y_scale));
+            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, H_PADDING - tw - TEXT_MARGIN, y, AXIS_FONT_SIZE, FOREGROUND);
+        }
 
         for (size_t i = 0; i < cgroups_len; i++) {
             if (filter && i != filter_idx) continue;
@@ -358,10 +382,15 @@ int main(int argc, char *argv[]) {
             for (size_t j = 0; j < entry.points_len; j++) {
                 Point point = entry.points[j];
 
-                int x = H_PADDING + (round((point.time_us - min_time_us) / ts_per_px) - INNER_WIDTH * offset) * x_scale;
-                if (x > WIDTH - H_PADDING) break;
-                int y = HEIGHT - V_PADDING - round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
-                if (y < V_PADDING) y = V_PADDING;
+                int x = (point.time_us - min_time_us - (max_time_us - min_time_us) * offset) / ts_per_px * x_scale;
+                if (x > INNER_WIDTH) break;  // TODO: this causes the line to end abruptly on high zoom levels
+                if (x < 0) continue;
+
+                int y = HEIGHT - round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
+                if (y < 0) y = 0;
+
+                x += H_PADDING;
+                y -= V_PADDING;
 
                 DrawLine(px, py, x, y, entry.color);
 
