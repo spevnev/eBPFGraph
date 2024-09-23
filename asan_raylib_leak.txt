@@ -1,0 +1,2 @@
+# Ignore memory leak caused by raylib
+leak:/usr/lib/libraylib.so
