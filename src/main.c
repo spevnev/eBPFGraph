@@ -28,6 +28,7 @@ static const int AXIS_FONT_SIZE = 10;
 static const int TEXT_MARGIN = 4;
 static const int LEGEND_COLOR_SIZE = 16;
 static const int LEGEND_COLOR_PADDING = 4;
+static const int LEGEND_COLOR_THICKNESS = 2;
 static const int LEGEND_FONT_SIZE = 16;
 static const int LEGEND_PADDING = 20;
 
@@ -308,28 +309,18 @@ int main(int argc, char *argv[]) {
     double ts_per_px = (max_time_us - min_time_us) / INNER_WIDTH;
     double latency_per_px = (max_latency_us - min_latency_us) / INNER_HEIGHT;
 
+    double offset = 0.0f;
+    double x_scale = 1.0f;
+    double y_scale = 1.0f;
+    bool *enabled_cgroups = malloc(cgroups_len * sizeof(*enabled_cgroups));
+    memset(enabled_cgroups, true, cgroups_len);
+
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
 
-    double offset = 0.0f;
-    double x_scale = 1.0f;
-    double y_scale = 1.0f;
-    bool filter = false;
-    size_t filter_idx = 0;
     while (!WindowShouldClose()) {
         // TODO: min & max to simplify:
-
-        if (IsKeyReleased(KEY_Q)) {
-            filter = !filter;
-        }
-        if (IsKeyReleased(KEY_W)) {
-            if (filter && filter_idx > 0) filter_idx--;
-        }
-        if (IsKeyReleased(KEY_E)) {
-            if (filter && filter_idx + 1 < cgroups_len) filter_idx++;
-        }
-
         if (IsKeyDown(KEY_LEFT)) {
             offset -= 1.0f / (x_scale * OFFSET_SPEED);
             if (offset < 0.0f) offset = 0.0f;
@@ -359,6 +350,7 @@ int main(int argc, char *argv[]) {
 
         BeginDrawing();
         ClearBackground(BACKGROUND);
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
         char buffer[256];
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
@@ -384,9 +376,25 @@ int main(int argc, char *argv[]) {
 
         int w = H_PADDING;
         for (size_t i = 0; i < cgroups_len; i++) {
-            DrawRectangle(w, (T_PADDING - LEGEND_COLOR_SIZE) / 2, LEGEND_COLOR_SIZE, LEGEND_COLOR_SIZE,
-                          cgroups[i].color);
+            Rectangle rec = {
+                .x = w,
+                .y = (T_PADDING - LEGEND_COLOR_SIZE) / 2,
+                .width = LEGEND_COLOR_SIZE,
+                .height = LEGEND_FONT_SIZE,
+            };
+
+            if (enabled_cgroups[i]) {
+                DrawRectangleRec(rec, cgroups[i].color);
+            } else {
+                DrawRectangleLinesEx(rec, LEGEND_COLOR_THICKNESS, cgroups[i].color);
+            }
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
+
+            bool is_hovering = CheckCollisionPointRec(GetMousePosition(), rec);
+            if (is_hovering) {
+                SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) enabled_cgroups[i] = !enabled_cgroups[i];
+            }
 
             snprintf(buffer, 256, "%d", cgroups[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
@@ -395,7 +403,7 @@ int main(int argc, char *argv[]) {
         }
 
         for (size_t i = 0; i < cgroups_len; i++) {
-            if (filter && i != filter_idx) continue;
+            if (!enabled_cgroups[i]) continue;
 
             Cgroup entry = cgroups[i];
 
@@ -427,6 +435,7 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
+    free(enabled_cgroups);
     for (size_t i = 0; i < cgroups_len; i++) free(cgroups[i].points);
     free(cgroups);
 
