@@ -257,6 +257,14 @@ Vector2 MeasureText2(const char *text, float font_size) {
     return MeasureTextEx(GetFontDefault(), text, font_size, font_size / GetFontDefault().baseSize);
 }
 
+bool button(Rectangle rec) {
+    bool is_mouse_over = CheckCollisionPointRec(GetMousePosition(), rec);
+    if (!is_mouse_over) return false;
+
+    SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+    return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 int main(int argc, char *argv[]) {
     if (RAYLIB_VERSION_MAJOR != 5) {
         fprintf(stderr, "ERROR: required raylib version is 5.y.z.\n");
@@ -390,11 +398,8 @@ int main(int argc, char *argv[]) {
             }
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
 
-            bool is_hovering = CheckCollisionPointRec(GetMousePosition(), rec);
-            if (is_hovering) {
-                SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
-                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) enabled_cgroups[i] = !enabled_cgroups[i];
-            }
+            bool is_clicked = button(rec);
+            if (is_clicked) enabled_cgroups[i] = !enabled_cgroups[i];
 
             snprintf(buffer, 256, "%d", cgroups[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
