@@ -11,18 +11,17 @@
 #include <string.h>
 #include <unistd.h>
 
-// TODO: full screen?
-
+// Window
 static const char *TITLE = "eBPF Graph";
-
-// Geometry
 static const int WIDTH = 1600;
 static const int HEIGHT = 900;
-static const int H_PADDING = 60;
-static const int T_PADDING = 70;
-static const int B_PADDING = 30;
-#define INNER_WIDTH (WIDTH - 2 * H_PADDING)
-#define INNER_HEIGHT (HEIGHT - T_PADDING - B_PADDING)
+
+// UI sizes
+static const int HOR_PADDING = 60;
+static const int TOP_PADDING = 70;
+static const int BOT_PADDING = 30;
+#define INNER_WIDTH (WIDTH - 2 * HOR_PADDING)
+#define INNER_HEIGHT (HEIGHT - TOP_PADDING - BOT_PADDING)
 static const int GRID_SIZE = 60;
 static const int AXIS_FONT_SIZE = 10;
 static const int TEXT_MARGIN = 4;
@@ -45,8 +44,9 @@ static const size_t CGROUP_MIN_POINTS = 500;
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
-static const float Y_SCALE_SPEED = 1.05f;
 static const float X_SCALE_SPEED = 1.05f;
+static const float Y_SCALE_SPEED = 1.05f;
+static const float MIN_Y_SCALE = 0.8f;
 
 // Memory
 static const size_t DEFAULT_ENTRIES_CAPACITY = 65536;
@@ -78,19 +78,29 @@ typedef struct {
     Point *points;
 } Cgroup;
 
+#define MeasureText2(text, font_size) \
+    MeasureTextEx(GetFontDefault(), (text), (font_size), (font_size) / GetFontDefault().baseSize)
+
+#define MAX(a, b) ((a) >= (b) ? (a) : (b))
+#define MIN(a, b) ((a) <= (b) ? (a) : (b))
+
 static void usage(const char *program) {
     assert(program != NULL);
     printf("usage: %s <filename>\n", program);
 }
 
 static const char *skip_field(const char *ch) {
-    while (*ch == ' ' && *ch != '\0') ch++;
+    assert(ch != NULL);
+
+    while (*ch == ' ') ch++;
     while (*ch != ' ' && *ch != '\0') ch++;
-    assert(*ch != '\0');
+
     return ch;
 }
 
 static const char *llong_field(long long *ret, const char *ch) {
+    assert(ret != NULL && ch != NULL);
+
     while (*ch == ' ') ch++;
 
     char *end = NULL;
@@ -100,7 +110,7 @@ static const char *llong_field(long long *ret, const char *ch) {
     return end;
 }
 
-static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) {
+static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) {
     assert(ret_entries != NULL && ret_entries_len != NULL && fp != NULL);
 
     size_t entries_capacity = DEFAULT_ENTRIES_CAPACITY;
@@ -155,10 +165,15 @@ static int parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) 
 
     *ret_entries = entries;
     *ret_entries_len = entries_len;
-    return 0;
 }
 
-int process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, size_t entries_len) {
+static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, FILE *fp) {
+    assert(ret_cgroups != NULL && ret_cgroups_len != NULL && fp != NULL);
+
+    Entry *entries;
+    size_t entries_len;
+    parse_output(&entries, &entries_len, fp);
+
     size_t cgroups_capacity = DEFAULT_CGROUPS_CAPACITY;
     size_t cgroups_len = 0;
     Cgroup *cgroups = malloc(cgroups_capacity * sizeof(*cgroups));
@@ -228,9 +243,6 @@ int process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, 
         }
     }
 
-    for (size_t i = l; i < cgroups_len; i++) free(cgroups[i].points);
-    cgroups_len = l;
-
     // TODO: group into "others" line; requires merging points
     //     l++;
     //     Cgroup *other = &cgroups[l];
@@ -248,16 +260,16 @@ int process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, 
     //         other->points_len += cgroups[i].points_len;
     //     }
 
+    for (size_t i = l; i < cgroups_len; i++) free(cgroups[i].points);
+    cgroups_len = l;
+
+    free(entries);
+
     *ret_cgroups = cgroups;
     *ret_cgroups_len = cgroups_len;
-    return 0;
 }
 
-Vector2 MeasureText2(const char *text, float font_size) {
-    return MeasureTextEx(GetFontDefault(), text, font_size, font_size / GetFontDefault().baseSize);
-}
-
-bool button(Rectangle rec) {
+static bool button(Rectangle rec) {
     bool is_mouse_over = CheckCollisionPointRec(GetMousePosition(), rec);
     if (!is_mouse_over) return false;
 
@@ -282,24 +294,12 @@ int main(int argc, char *argv[]) {
     FILE *fp = fopen(argv[1], "r");
     if (fp == NULL) {
         fprintf(stderr, "ERROR: unable to open file \"%s\": %s.\n", argv[1], strerror(errno));
-        usage(program);
-        return EXIT_FAILURE;
-    }
-
-    Entry *entries;
-    size_t entries_len;
-    if (parse_output(&entries, &entries_len, fp) != 0) {
-        fprintf(stderr, "ERROR: unable to parse file.\n");
         return EXIT_FAILURE;
     }
 
     Cgroup *cgroups;
     size_t cgroups_len;
-    if (process_data(&cgroups, &cgroups_len, entries, entries_len) != 0) {
-        fprintf(stderr, "ERROR: unable to process data.\n");
-        return EXIT_FAILURE;
-    }
-    free(entries);
+    process_data(&cgroups, &cgroups_len, fp);
 
     fclose(fp);
 
@@ -321,6 +321,7 @@ int main(int argc, char *argv[]) {
     double x_scale = 1.0f;
     double y_scale = 1.0f;
     bool *enabled_cgroups = malloc(cgroups_len * sizeof(*enabled_cgroups));
+    assert(enabled_cgroups != NULL);
     memset(enabled_cgroups, true, cgroups_len);
 
     SetTraceLogLevel(LOG_WARNING);
@@ -328,33 +329,17 @@ int main(int argc, char *argv[]) {
     SetTargetFPS(30);
 
     while (!WindowShouldClose()) {
-        // TODO: min & max to simplify:
-        if (IsKeyDown(KEY_LEFT)) {
-            offset -= 1.0f / (x_scale * OFFSET_SPEED);
-            if (offset < 0.0f) offset = 0.0f;
-        }
-        if (IsKeyDown(KEY_RIGHT)) {
-            offset += 1.0f / (OFFSET_SPEED * x_scale);
-            if (1.0f / x_scale + offset > 1.0f) offset = 1.0f - 1.0f / x_scale;
-        }
+        if (IsKeyDown(KEY_LEFT)) offset = MAX(offset - 1.0f / (x_scale * OFFSET_SPEED), 0.0f);
+        if (IsKeyDown(KEY_RIGHT)) offset = MIN(offset + 1.0f / (OFFSET_SPEED * x_scale), 1.0f - 1.0f / x_scale);
 
-        // TODO: double vs float
-        if (IsKeyDown(KEY_UP)) {
-            y_scale *= Y_SCALE_SPEED;
-        }
-        if (IsKeyDown(KEY_DOWN)) {
-            y_scale /= Y_SCALE_SPEED;
-            if (y_scale < 0.8f) y_scale = 0.8f;
-        }
-
-        if (IsKeyDown(KEY_EQUAL)) {
-            x_scale *= X_SCALE_SPEED;
-        }
+        if (IsKeyDown(KEY_EQUAL)) x_scale *= X_SCALE_SPEED;
         if (IsKeyDown(KEY_MINUS)) {
-            x_scale /= X_SCALE_SPEED;
-            if (x_scale < 1.0f) x_scale = 1.0f;
-            if (1.0f / x_scale + offset > 1.0f) offset = 1.0f - 1.0f / x_scale;
+            x_scale = MAX(x_scale / X_SCALE_SPEED, 1.0f);
+            offset = MIN(offset, 1.0f - 1.0f / x_scale);
         }
+
+        if (IsKeyDown(KEY_UP)) y_scale *= Y_SCALE_SPEED;
+        if (IsKeyDown(KEY_DOWN)) y_scale = MAX(y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
 
         BeginDrawing();
         ClearBackground(BACKGROUND);
@@ -362,31 +347,32 @@ int main(int argc, char *argv[]) {
 
         char buffer[256];
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
-            int x = i * GRID_SIZE + H_PADDING;
-            DrawLine(x, T_PADDING, x, HEIGHT - B_PADDING, GRID_COLOR);
+            int x = i * GRID_SIZE + HOR_PADDING;
+            DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
 
+            // TODO: it uses microseconds, right? do milli?
             snprintf(buffer, 256, "%llu",
                      (long long unsigned) (min_time_us + ts_per_px * i * GRID_SIZE / x_scale
                                            + (max_time_us - min_time_us) * offset));
             int tw = MeasureText(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, x - tw / 2, HEIGHT - B_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
+            DrawText(buffer, x - tw / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
 
             // TODO: add time
         }
         for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
-            int y = HEIGHT - B_PADDING - GRID_SIZE * i;
-            DrawLine(H_PADDING, y, WIDTH - H_PADDING, y, GRID_COLOR);
+            int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
+            DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
             snprintf(buffer, 256, "%d", (int) (latency_per_px * i * GRID_SIZE / y_scale));
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, H_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
+            DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
         }
 
-        int w = H_PADDING;
+        int w = HOR_PADDING;
         for (size_t i = 0; i < cgroups_len; i++) {
             Rectangle rec = {
                 .x = w,
-                .y = (T_PADDING - LEGEND_COLOR_SIZE) / 2,
+                .y = (TOP_PADDING - LEGEND_COLOR_SIZE) / 2,
                 .width = LEGEND_COLOR_SIZE,
                 .height = LEGEND_FONT_SIZE,
             };
@@ -403,7 +389,7 @@ int main(int argc, char *argv[]) {
 
             snprintf(buffer, 256, "%d", cgroups[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
-            DrawText(buffer, w, (T_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups[i].color);
+            DrawText(buffer, w, (TOP_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups[i].color);
             w += td.x + LEGEND_PADDING;
         }
 
@@ -412,21 +398,24 @@ int main(int argc, char *argv[]) {
 
             Cgroup entry = cgroups[i];
 
-            int px = H_PADDING;
-            int py = HEIGHT - B_PADDING;
+            int px = HOR_PADDING;
+            int py = HEIGHT - BOT_PADDING;
 
             for (size_t j = 0; j < entry.points_len; j++) {
                 Point point = entry.points[j];
 
                 int x = (point.time_us - min_time_us - (max_time_us - min_time_us) * offset) / ts_per_px * x_scale;
-                if (x > INNER_WIDTH) break;  // TODO: this causes the line to end abruptly on high zoom levels
+                if (x > INNER_WIDTH) {
+                    // TODO: render last line, which is out of screen), perhaps, using linear interpolation
+                    break;
+                }
                 if (x < 0) continue;
 
                 int y = HEIGHT - round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
                 if (y < 0) y = 0;
 
-                x += H_PADDING;
-                y -= B_PADDING;
+                x += HOR_PADDING;
+                y -= BOT_PADDING;
 
                 DrawLine(px, py, x, y, entry.color);
 
