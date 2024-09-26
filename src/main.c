@@ -54,14 +54,14 @@ static const size_t DEFAULT_CGROUPS_CAPACITY = 64;
 static const size_t DEFAULT_POINTS_CAPACITY = 16384;
 
 typedef struct {
-    int real_time_s;
-    uint64_t time_ns;
+    int time_s;
+    uint64_t ts_ns;
     int32_t cgroup;
     uint32_t latency_ns;
 } Entry;
 
 typedef struct {
-    uint64_t time_us;
+    uint64_t ts_us;
     uint32_t latency_us;
 } Point;
 
@@ -69,8 +69,8 @@ typedef struct {
     int32_t cgroup;
     Color color;
 
-    uint64_t min_time_us;
-    uint64_t max_time_us;
+    uint64_t min_ts_us;
+    uint64_t max_ts_us;
     uint32_t min_latency_us;
     uint32_t max_latency_us;
 
@@ -154,10 +154,10 @@ static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp)
         const char *ch = line;
 
         // TIME
-        int real_time_s;
-        ch = time_field(&real_time_s, ch);
-        assert(0 <= real_time_s);
-        entries[entries_len].real_time_s = real_time_s;
+        int time_s;
+        ch = time_field(&time_s, ch);
+        assert(0 <= time_s);
+        entries[entries_len].time_s = time_s;
 
         // PREV_CGROUP
         ch = skip_field(ch);
@@ -175,10 +175,10 @@ static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp)
         entries[entries_len].latency_ns = latency_ns;
 
         // TS
-        long long time_ns;
-        ch = llong_field(&time_ns, ch);
-        assert(0 <= time_ns);
-        entries[entries_len].time_ns = time_ns;
+        long long ts_ns;
+        ch = llong_field(&ts_ns, ch);
+        assert(0 <= ts_ns);
+        entries[entries_len].ts_ns = ts_ns;
 
         entries_len++;
         if (entries_len == entries_capacity) {
@@ -214,8 +214,8 @@ static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *e
             cgroup = &cgroups[cgroups_len];
             cgroup->cgroup = entries[i].cgroup;
             cgroup->color = COLORS[cgroups_len % COLORS_LEN];
-            cgroup->min_time_us = UINT64_MAX;
-            cgroup->max_time_us = 0;
+            cgroup->min_ts_us = UINT64_MAX;
+            cgroup->max_ts_us = 0;
             cgroup->min_latency_us = UINT32_MAX;
             cgroup->max_latency_us = 0;
             cgroup->points_capacity = DEFAULT_POINTS_CAPACITY;
@@ -232,17 +232,17 @@ static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *e
         }
 
         uint64_t latency_us = entries[i].latency_ns / 1000;
-        uint32_t time_us = entries[i].time_ns / 1000;
+        uint32_t ts_us = entries[i].ts_ns / 1000;
 
-        if (time_us < cgroup->min_time_us) cgroup->min_time_us = time_us;
-        if (time_us > cgroup->max_time_us) cgroup->max_time_us = time_us;
-        if (latency_us < cgroup->min_latency_us) cgroup->min_latency_us = latency_us;
-        if (latency_us > cgroup->max_latency_us) cgroup->max_latency_us = latency_us;
+        cgroup->min_ts_us = MIN(cgroup->min_ts_us, ts_us);
+        cgroup->max_ts_us = MAX(cgroup->max_ts_us, ts_us);
+        cgroup->min_latency_us = MIN(cgroup->min_latency_us, latency_us);
+        cgroup->max_latency_us = MAX(cgroup->max_latency_us, latency_us);
 
         // TODO: batch & average
 
         cgroup->points[cgroup->points_len].latency_us = latency_us;
-        cgroup->points[cgroup->points_len].time_us = time_us;
+        cgroup->points[cgroup->points_len].ts_us = ts_us;
         cgroup->points_len++;
 
         if (cgroup->points_len == cgroup->points_capacity) {
@@ -321,8 +321,9 @@ int main(int argc, char *argv[]) {
     size_t entries_len;
     parse_output(&entries, &entries_len, fp);
 
-    int min_real_time_s = entries[0].real_time_s;
-    int max_real_time_s = entries[entries_len - 1].real_time_s;
+    int min_time_s = entries[0].time_s;
+    int max_time_s = entries[entries_len - 1].time_s;
+    double time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
 
     Cgroup *cgroups;
     size_t cgroups_len;
@@ -331,19 +332,18 @@ int main(int argc, char *argv[]) {
     free(entries);
     fclose(fp);
 
-    uint64_t min_time_us = UINT64_MAX;
-    uint64_t max_time_us = 0;
+    uint64_t min_ts_us = UINT64_MAX;
+    uint64_t max_ts_us = 0;
     uint32_t min_latency_us = UINT32_MAX;
     uint32_t max_latency_us = 0;
     for (size_t i = 0; i < cgroups_len; i++) {
-        if (cgroups[i].min_time_us < min_time_us) min_time_us = cgroups[i].min_time_us;
-        if (cgroups[i].max_time_us > max_time_us) max_time_us = cgroups[i].max_time_us;
-        if (cgroups[i].min_latency_us < min_latency_us) min_latency_us = cgroups[i].min_latency_us;
-        if (cgroups[i].max_latency_us > max_latency_us) max_latency_us = cgroups[i].max_latency_us;
+        min_ts_us = MIN(min_ts_us, cgroups[i].min_ts_us);
+        max_ts_us = MAX(max_ts_us, cgroups[i].max_ts_us);
+        min_latency_us = MIN(min_latency_us, cgroups[i].min_latency_us);
+        max_latency_us = MAX(max_latency_us, cgroups[i].max_latency_us);
     }
 
-    double ts_per_px = (max_time_us - min_time_us) / ((double) INNER_WIDTH);
-    double real_time_per_px = (max_real_time_s - min_real_time_s) / ((double) INNER_WIDTH);
+    double ts_per_px = (max_ts_us - min_ts_us) / ((double) INNER_WIDTH);
     double latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
 
     double offset = 0.0f;
@@ -381,13 +381,12 @@ int main(int argc, char *argv[]) {
             DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
 
             // TODO: it uses microseconds, right? do milli?
-            uint64_t time_us = min_time_us + ts_per_px * i * GRID_SIZE / x_scale + (max_time_us - min_time_us) * offset;
-            snprintf(buffer, 256, "%llu", (long long unsigned int) time_us);
+            uint64_t ts_us = min_ts_us + ts_per_px * i * GRID_SIZE / x_scale + (max_ts_us - min_ts_us) * offset;
+            snprintf(buffer, 256, "%llu", (long long unsigned int) ts_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, x - td.x / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
 
-            int time_s = min_real_time_s + real_time_per_px * i * GRID_SIZE / x_scale
-                         + (max_real_time_s - min_real_time_s) * offset;
+            int time_s = min_time_s + time_per_px * i * GRID_SIZE / x_scale + (max_time_s - min_time_s) * offset;
             snprintf(buffer, 256, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
             int tw = MeasureText(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, x - tw / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN + td.y + TEXT_MARGIN, AXIS_FONT_SIZE,
@@ -438,7 +437,7 @@ int main(int argc, char *argv[]) {
             for (size_t j = 0; j < entry.points_len; j++) {
                 Point point = entry.points[j];
 
-                int x = (point.time_us - min_time_us - (max_time_us - min_time_us) * offset) / ts_per_px * x_scale;
+                int x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
                 if (x > INNER_WIDTH) {
                     // TODO: render last line, which is out of screen), perhaps, using linear interpolation
                     break;
