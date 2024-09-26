@@ -18,8 +18,8 @@ static const int HEIGHT = 900;
 
 // UI sizes
 static const int HOR_PADDING = 60;
-static const int TOP_PADDING = 70;
-static const int BOT_PADDING = 30;
+static const int TOP_PADDING = 60;
+static const int BOT_PADDING = 40;
 #define INNER_WIDTH (WIDTH - 2 * HOR_PADDING)
 #define INNER_HEIGHT (HEIGHT - TOP_PADDING - BOT_PADDING)
 static const int GRID_SIZE = 60;
@@ -54,6 +54,7 @@ static const size_t DEFAULT_CGROUPS_CAPACITY = 64;
 static const size_t DEFAULT_POINTS_CAPACITY = 16384;
 
 typedef struct {
+    int real_time_s;
     uint64_t time_ns;
     int32_t cgroup;
     uint32_t latency_ns;
@@ -98,6 +99,28 @@ static const char *skip_field(const char *ch) {
     return ch;
 }
 
+static const char *time_field(int *ret_s, const char *ch) {
+    assert(ret_s != NULL && ch != NULL);
+
+    while (*ch == ' ') ch++;
+
+    char *end = NULL;
+
+    long h = strtol(ch, &end, 10);
+    assert(ch < end);
+    ch = end + 1;
+
+    long m = strtol(ch, &end, 10);
+    assert(ch < end);
+    ch = end + 1;
+
+    long s = strtol(ch, &end, 10);
+    assert(ch < end);
+
+    *ret_s = h * 3600 + m * 60 + s;
+    return end;
+}
+
 static const char *llong_field(long long *ret, const char *ch) {
     assert(ret != NULL && ch != NULL);
 
@@ -105,7 +128,7 @@ static const char *llong_field(long long *ret, const char *ch) {
 
     char *end = NULL;
     *ret = strtoll(ch, &end, 10);
-    assert(end != NULL && ch < end);
+    assert(ch < end);
 
     return end;
 }
@@ -131,7 +154,10 @@ static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp)
         const char *ch = line;
 
         // TIME
-        ch = skip_field(ch);
+        int real_time_s;
+        ch = time_field(&real_time_s, ch);
+        assert(0 <= real_time_s);
+        entries[entries_len].real_time_s = real_time_s;
 
         // PREV_CGROUP
         ch = skip_field(ch);
@@ -167,12 +193,8 @@ static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp)
     *ret_entries_len = entries_len;
 }
 
-static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, FILE *fp) {
-    assert(ret_cgroups != NULL && ret_cgroups_len != NULL && fp != NULL);
-
-    Entry *entries;
-    size_t entries_len;
-    parse_output(&entries, &entries_len, fp);
+static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, size_t entries_len) {
+    assert(ret_cgroups != NULL && ret_cgroups_len != NULL && entries != NULL);
 
     size_t cgroups_capacity = DEFAULT_CGROUPS_CAPACITY;
     size_t cgroups_len = 0;
@@ -263,8 +285,6 @@ static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, FILE *fp
     for (size_t i = l; i < cgroups_len; i++) free(cgroups[i].points);
     cgroups_len = l;
 
-    free(entries);
-
     *ret_cgroups = cgroups;
     *ret_cgroups_len = cgroups_len;
 }
@@ -297,10 +317,18 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    Entry *entries;
+    size_t entries_len;
+    parse_output(&entries, &entries_len, fp);
+
+    int min_real_time_s = entries[0].real_time_s;
+    int max_real_time_s = entries[entries_len - 1].real_time_s;
+
     Cgroup *cgroups;
     size_t cgroups_len;
-    process_data(&cgroups, &cgroups_len, fp);
+    process_data(&cgroups, &cgroups_len, entries, entries_len);
 
+    free(entries);
     fclose(fp);
 
     uint64_t min_time_us = UINT64_MAX;
@@ -314,12 +342,14 @@ int main(int argc, char *argv[]) {
         if (cgroups[i].max_latency_us > max_latency_us) max_latency_us = cgroups[i].max_latency_us;
     }
 
-    double ts_per_px = (max_time_us - min_time_us) / INNER_WIDTH;
-    double latency_per_px = (max_latency_us - min_latency_us) / INNER_HEIGHT;
+    double ts_per_px = (max_time_us - min_time_us) / ((double) INNER_WIDTH);
+    double real_time_per_px = (max_real_time_s - min_real_time_s) / ((double) INNER_WIDTH);
+    double latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
 
     double offset = 0.0f;
     double x_scale = 1.0f;
     double y_scale = 1.0f;
+
     bool *enabled_cgroups = malloc(cgroups_len * sizeof(*enabled_cgroups));
     assert(enabled_cgroups != NULL);
     memset(enabled_cgroups, true, cgroups_len);
@@ -351,13 +381,17 @@ int main(int argc, char *argv[]) {
             DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
 
             // TODO: it uses microseconds, right? do milli?
-            snprintf(buffer, 256, "%llu",
-                     (long long unsigned) (min_time_us + ts_per_px * i * GRID_SIZE / x_scale
-                                           + (max_time_us - min_time_us) * offset));
-            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, x - tw / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
+            uint64_t time_us = min_time_us + ts_per_px * i * GRID_SIZE / x_scale + (max_time_us - min_time_us) * offset;
+            snprintf(buffer, 256, "%llu", (long long unsigned int) time_us);
+            Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, x - td.x / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
 
-            // TODO: add time
+            int time_s = min_real_time_s + real_time_per_px * i * GRID_SIZE / x_scale
+                         + (max_real_time_s - min_real_time_s) * offset;
+            snprintf(buffer, 256, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
+            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, x - tw / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN + td.y + TEXT_MARGIN, AXIS_FONT_SIZE,
+                     FOREGROUND);
         }
         for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
             int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
