@@ -380,7 +380,6 @@ int main(int argc, char *argv[]) {
             int x = i * GRID_SIZE + HOR_PADDING;
             DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
 
-            // TODO: it uses microseconds, right? do milli?
             uint64_t ts_us = min_ts_us + ts_per_px * i * GRID_SIZE / x_scale + (max_ts_us - min_ts_us) * offset;
             snprintf(buffer, 256, "%llu", (long long unsigned int) ts_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
@@ -396,7 +395,8 @@ int main(int argc, char *argv[]) {
             int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
             DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
-            snprintf(buffer, 256, "%d", (int) (latency_per_px * i * GRID_SIZE / y_scale));
+            uint32_t latency_us = min_latency_us + latency_per_px * i * GRID_SIZE / y_scale;
+            snprintf(buffer, 256, "%u", (unsigned int) latency_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
         }
@@ -428,32 +428,60 @@ int main(int argc, char *argv[]) {
 
         for (size_t i = 0; i < cgroups_len; i++) {
             if (!enabled_cgroups[i]) continue;
-
             Cgroup entry = cgroups[i];
 
-            int px = HOR_PADDING;
-            int py = HEIGHT - BOT_PADDING;
-
-            for (size_t j = 0; j < entry.points_len; j++) {
+            int px = -1;
+            int py = -1;
+            int npx, npy;
+            for (size_t j = 0; j < entry.points_len; j++, px = npx, py = npy) {
                 Point point = entry.points[j];
 
                 int x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-                if (x > INNER_WIDTH) {
-                    // TODO: render last line, which is out of screen), perhaps, using linear interpolation
-                    break;
-                }
+                int y = round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
+
+                npx = x;
+                npy = y;
+
                 if (x < 0) continue;
+                if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
 
-                int y = HEIGHT - round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
-                if (y < 0) y = 0;
+                if (px != -1) {
+                    int rpx = px;
+                    int rpy = py;
+                    int rx = x;
+                    int ry = y;
 
-                x += HOR_PADDING;
-                y -= BOT_PADDING;
+                    // TODO: use lerp?
+                    if (rpx < 0) {
+                        assert(x != px);
+                        double k = px / ((double) (px - x));
+                        rpx = 0;
+                        rpy = py + (y - py) * k;
+                    }
+                    if (rx > INNER_WIDTH) {
+                        assert(x != px);
+                        double k = (x - INNER_WIDTH) / ((double) (x - px));
+                        rx = INNER_WIDTH;
+                        ry = py + (y - py) * (1.0f - k);
+                    }
+                    if (rpy > INNER_HEIGHT) {
+                        assert(y != py);
+                        double k = (py - INNER_HEIGHT) / ((double) (py - y));
+                        rpx = px + (x - px) * k;
+                        rpy = INNER_HEIGHT;
+                    }
+                    if (ry > INNER_HEIGHT) {
+                        assert(y != py);
+                        double k = (y - INNER_HEIGHT) / ((double) (y - py));
+                        rx = px + (x - px) * (1.0f - k);
+                        ry = INNER_HEIGHT;
+                    }
 
-                DrawLine(px, py, x, y, entry.color);
+                    DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
+                             entry.color);
+                }
 
-                px = x;
-                py = y;
+                if (x >= INNER_WIDTH) break;
             }
         }
 
