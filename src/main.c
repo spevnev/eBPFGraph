@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/prctl.h>
 #include <math.h>
 #include <raylib.h>
 #include <stdbool.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 // Window
@@ -84,11 +86,6 @@ typedef struct {
 
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
-
-static void usage(const char *program) {
-    assert(program != NULL);
-    printf("usage: %s <filename>\n", program);
-}
 
 static const char *skip_field(const char *ch) {
     assert(ch != NULL);
@@ -297,9 +294,35 @@ static bool button(Rectangle rec) {
     return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
+static int start_ebpf(pid_t *child) {
+    int fd[2];
+    if (pipe(fd) == -1) abort();  // TODO:
+    int read_fd = fd[0];
+    int write_fd = fd[1];
+
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+
+    pid_t pid = fork();
+    if (pid == -1) abort();  // TODO:
+
+    // TODO: error handling:
+    if (pid == 0) {
+        dup2(write_fd, STDOUT_FILENO);
+        close(read_fd);
+        // TODO: remove absolute path
+        execle("/home/tx/srcs/eunomia/ecli", "ecli", "run", "ebpf/package.json");
+        exit(EXIT_FAILURE);
+    }
+
+    close(write_fd);
+
+    *child = pid;
+    return read_fd;
+}
+
 int main(int argc, char *argv[]) {
     if (RAYLIB_VERSION_MAJOR != 5) {
-        fprintf(stderr, "ERROR: required raylib version is 5.y.z.\n");
+        fprintf(stderr, "ERROR: the required raylib version is 5.\n");
         return EXIT_FAILURE;
     }
 
@@ -307,9 +330,27 @@ int main(int argc, char *argv[]) {
     const char *program = argv[0];
 
     if (argc != 2) {
-        usage(program);
+        printf("usage: %s <filename>\n", program);
         return EXIT_FAILURE;
     }
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "ERROR: must be ran as root.\n");
+        return EXIT_FAILURE;
+    }
+
+    pid_t child;
+    int input_fd = start_ebpf(&child);
+    getchar();
+    kill(child, SIGTERM);
+    close(input_fd);
+
+    if (setgid(1000) != 0 || setuid(1000) != 0) {
+        fprintf(stderr, "ERROR: unable to drop user privileges.\n");
+        return EXIT_FAILURE;
+    }
+
+    return 0;
 
     FILE *fp = fopen(argv[1], "r");
     if (fp == NULL) {
@@ -444,42 +485,40 @@ int main(int argc, char *argv[]) {
 
                 if (x < 0) continue;
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
+                if (px == -1) continue;
 
-                if (px != -1) {
-                    int rpx = px;
-                    int rpy = py;
-                    int rx = x;
-                    int ry = y;
+                int rpx = px;
+                int rpy = py;
+                int rx = x;
+                int ry = y;
 
-                    // TODO: use lerp?
-                    if (rpx < 0) {
-                        assert(x != px);
-                        double k = px / ((double) (px - x));
-                        rpx = 0;
-                        rpy = py + (y - py) * k;
-                    }
-                    if (rx > INNER_WIDTH) {
-                        assert(x != px);
-                        double k = (x - INNER_WIDTH) / ((double) (x - px));
-                        rx = INNER_WIDTH;
-                        ry = py + (y - py) * (1.0f - k);
-                    }
-                    if (rpy > INNER_HEIGHT) {
-                        assert(y != py);
-                        double k = (py - INNER_HEIGHT) / ((double) (py - y));
-                        rpx = px + (x - px) * k;
-                        rpy = INNER_HEIGHT;
-                    }
-                    if (ry > INNER_HEIGHT) {
-                        assert(y != py);
-                        double k = (y - INNER_HEIGHT) / ((double) (y - py));
-                        rx = px + (x - px) * (1.0f - k);
-                        ry = INNER_HEIGHT;
-                    }
-
-                    DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
-                             entry.color);
+                if (rpx < 0) {
+                    assert(x != px);
+                    double k = px / ((double) (px - x));
+                    rpx = 0;
+                    rpy = py + (y - py) * k;
                 }
+                if (rx > INNER_WIDTH) {
+                    assert(x != px);
+                    double k = (x - INNER_WIDTH) / ((double) (x - px));
+                    rx = INNER_WIDTH;
+                    ry = py + (y - py) * (1.0f - k);
+                }
+                if (rpy > INNER_HEIGHT) {
+                    assert(y != py);
+                    double k = (py - INNER_HEIGHT) / ((double) (py - y));
+                    rpx = px + (x - px) * k;
+                    rpy = INNER_HEIGHT;
+                }
+                if (ry > INNER_HEIGHT) {
+                    assert(y != py);
+                    double k = (y - INNER_HEIGHT) / ((double) (y - py));
+                    rx = px + (x - px) * (1.0f - k);
+                    ry = INNER_HEIGHT;
+                }
+
+                DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
+                         entry.color);
 
                 if (x >= INNER_WIDTH) break;
             }
