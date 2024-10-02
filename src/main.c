@@ -45,8 +45,9 @@ static const Color COLORS[]
        {0x60, 0x60, 0xD8, 0xff}, {0x60, 0xD8, 0xD8, 0xff}, {0xD8, 0x60, 0xD8, 0xff}, {0xD8, 0xD8, 0x60, 0xff}};
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
-// Grouping
+// Data processing
 static const size_t CGROUP_MIN_POINTS = 500;  // TODO: percentage from the biggest one?
+static const uint64_t CGROUP_BATCHING_TIME_US = 100;
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
@@ -96,7 +97,8 @@ VECTOR_TYPEDEF(EntryVec, Entry);
 
 typedef struct {
     uint64_t ts_us;
-    uint32_t latency_us;
+    uint64_t total_latency_us;
+    int count;
 } Point;
 
 VECTOR_TYPEDEF(PointVec, Point);
@@ -274,21 +276,28 @@ static void process_data(CgroupVec *cgroups, EntryVec entries, size_t *entries_i
             cgroup = &cgroups->data[cgroups->length - 1];
         }
 
-        uint64_t latency_us = entries.data[i].latency_ns / 1000;
-        uint32_t ts_us = entries.data[i].ts_ns / 1000;
+        uint64_t ts_us = entries.data[i].ts_ns / 1000;
+        uint32_t latency_us = entries.data[i].latency_ns / 1000;
 
         cgroup->min_ts_us = MIN(cgroup->min_ts_us, ts_us);
         cgroup->max_ts_us = MAX(cgroup->max_ts_us, ts_us);
         cgroup->min_latency_us = MIN(cgroup->min_latency_us, latency_us);
         cgroup->max_latency_us = MAX(cgroup->max_latency_us, latency_us);
 
-        // TODO: batch & average
+        if (cgroup->points.length > 0
+            && ts_us - cgroup->points.data[cgroup->points.length - 1].ts_us < CGROUP_BATCHING_TIME_US) {
+            Point *last = &cgroup->points.data[cgroup->points.length - 1];
+            last->total_latency_us += latency_us;
+            last->count++;
+        } else {
+            Point point = {
+                .ts_us = ts_us,
+                .total_latency_us = latency_us,
+                .count = 1,
+            };
+            VECTOR_PUSH(&cgroup->points, point);
+        }
 
-        Point point = {
-            .latency_us = latency_us,
-            .ts_us = ts_us,
-        };
-        VECTOR_PUSH(&cgroup->points, point);
     }
     *entries_idx = i;
 
@@ -504,7 +513,7 @@ int main(void) {
                 Point point = entry.points.data[j];
 
                 double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-                double y = round((point.total_latency_us / point.count - min_latency_us) / latency_per_px) * y_scale;
+                double y = (point.total_latency_us / point.count - min_latency_us) / latency_per_px * y_scale;
 
                 npx = x;
                 npy = y;
