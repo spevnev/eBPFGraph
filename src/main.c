@@ -46,7 +46,7 @@ static const Color COLORS[]
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Data processing
-static const size_t CGROUP_MIN_POINTS = 500;  // TODO: percentage from the biggest one?
+static const size_t CGROUP_MIN_POINTS = 500;
 static const uint64_t CGROUP_BATCHING_TIME_US = 100;
 
 // Controls
@@ -112,6 +112,7 @@ VECTOR_TYPEDEF(PointVec, Point);
 
 typedef struct {
     bool is_enabled;
+    bool is_visible;
     int32_t cgroup;
     Color color;
     uint64_t min_ts_us;
@@ -324,17 +325,8 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         i++;
     }
 
-    size_t l = 0, r = cgroups->length - 1;
-    while (l < r) {
-        while (l < r && cgroups->data[l].points.length >= CGROUP_MIN_POINTS) l++;
-        while (l < r && cgroups->data[r].points.length < CGROUP_MIN_POINTS) r--;
-        if (l < r) {
-            Cgroup temp = cgroups->data[l];
-            cgroups->data[l] = cgroups->data[r];
-            cgroups->data[r] = temp;
-            l++;
-            r--;
-        }
+    for (size_t i = 0; i < cgroups->length; i++) {
+        cgroups->data[i].is_visible = cgroups->data[i].points.length >= CGROUP_MIN_POINTS;
     }
 }
 
@@ -373,21 +365,21 @@ int main(void) {
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
 
-    SetTraceLogLevel(LOG_WARNING);
-    InitWindow(WIDTH, HEIGHT, TITLE);
-    SetTargetFPS(30);
-
     bool is_child_running = true;
 
     int min_time_s;
     int max_time_s;
-    double time_per_px;
     uint64_t min_ts_us = UINT64_MAX;
     uint64_t max_ts_us = 0;
     uint32_t min_latency_us = UINT32_MAX;
     uint32_t max_latency_us = 0;
+    double time_per_px;
     double ts_per_px;
     double latency_per_px;
+
+    SetTraceLogLevel(LOG_WARNING);
+    InitWindow(WIDTH, HEIGHT, TITLE);
+    SetTargetFPS(30);
 
     while (!WindowShouldClose()) {
         // Data
@@ -474,6 +466,9 @@ int main(void) {
 
         int w = HOR_PADDING;
         for (size_t i = 0; i < cgroups.length; i++) {
+            Cgroup *cgroup = &cgroups.data[i];
+            if (!cgroup->is_visible) continue;
+
             Rectangle rec = {
                 .x = w,
                 .y = (TOP_PADDING - LEGEND_COLOR_SIZE) / 2,
@@ -481,10 +476,10 @@ int main(void) {
                 .height = LEGEND_FONT_SIZE,
             };
 
-            if (cgroups.data[i].is_enabled) {
-                DrawRectangleRec(rec, cgroups.data[i].color);
+            if (cgroup->is_enabled) {
+                DrawRectangleRec(rec, cgroup->color);
             } else {
-                DrawRectangleLinesEx(rec, LEGEND_COLOR_THICKNESS, cgroups.data[i].color);
+                DrawRectangleLinesEx(rec, LEGEND_COLOR_THICKNESS, cgroup->color);
             }
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
 
@@ -492,9 +487,9 @@ int main(void) {
             if (is_clicked) {
                 if (IsKeyDown(KEY_LEFT_SHIFT)) {
                     for (size_t j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
-                    cgroups.data[i].is_enabled = true;
+                    cgroup->is_enabled = true;
                 } else {
-                    cgroups.data[i].is_enabled = !cgroups.data[i].is_enabled;
+                    cgroup->is_enabled = !cgroup->is_enabled;
                 }
             }
 
@@ -505,14 +500,14 @@ int main(void) {
         }
 
         for (size_t i = 0; i < cgroups.length; i++) {
-            if (!cgroups.data[i].is_enabled) continue;
-            Cgroup entry = cgroups.data[i];
+            Cgroup cgroup = cgroups.data[i];
+            if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
             double px = -1;
             double py = -1;
             double npx, npy;
-            for (size_t j = 0; j < entry.points.length; j++, px = npx, py = npy) {
-                Point point = entry.points.data[j];
+            for (size_t j = 0; j < cgroup.points.length; j++, px = npx, py = npy) {
+                Point point = cgroup.points.data[j];
 
                 double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
                 double y = (point.total_latency_us / point.count - min_latency_us) / latency_per_px * y_scale;
@@ -556,7 +551,7 @@ int main(void) {
                 }
 
                 DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
-                         entry.color);
+                         cgroup.color);
             }
         }
 
