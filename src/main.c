@@ -201,17 +201,16 @@ static const char *llong_field(long long *ret, const char *ch) {
 }
 
 
-static void parse_output(EntryVec *entries, pid_t child, int fd) {
+static int read_entries(EntryVec *entries, int fd) {
     assert(entries != NULL);
 
-    // TODO: make non-static:
-    static bool skipped_header = false;
-    const int buffer_size = 512;  // TODO: resize + move
-    static char buffer[512];      // TODO: must be able to hold at least on full line -> assumption
+    // Must hold at least one line
+    static char buffer[1024];
     static int buffer_offset = 0;
+    static bool skipped_header = false;
 
     ssize_t bytes;
-    while ((bytes = read(fd, buffer + buffer_offset, buffer_size - buffer_offset)) > 0) {
+    while ((bytes = read(fd, buffer + buffer_offset, sizeof(buffer) - buffer_offset)) > 0) {
         int length = buffer_offset + bytes;
 
         int i = 0;
@@ -266,26 +265,17 @@ static void parse_output(EntryVec *entries, pid_t child, int fd) {
             VECTOR_PUSH(entries, entry);
         }
     }
+    if (bytes == -1 && errno != EAGAIN) ERROR("unable to read from eBPF process.");
+    if (bytes == 0) return -1;
 
-    if (bytes == 0) {
-        // TODO: do this outside if this functions returns 1?
-        int status;
-        waitpid(child, &status, 0);
-        status = WEXITSTATUS(status);
-
-        // TODO: what if status == 0?
-        if (status == ENOENT) fprintf(stderr, "ERROR: unable to find \"ecli\" to run eBPF program.\n");
-        else fprintf(stderr, "ERROR: eBPF process exited unexpectedly.\n");
-        abort();  // TODO:
-    }
-    if (bytes == -1 && errno != EAGAIN) abort();  // TODO:
+    return 0;
 }
 
-static void process_data(CgroupVec *cgroups, EntryVec entries, size_t *entries_idx) {
+static void group_entries(CgroupVec *cgroups, EntryVec entries) {
     assert(cgroups != NULL);
 
-    size_t i;  // TODO: refactor
-    for (i = *entries_idx; i < entries.length; i++) {
+    static size_t i = 0;
+    while (i < entries.length) {
         Cgroup *cgroup = NULL;
         for (size_t j = 0; j < cgroups->length; j++) {
             if (entries.data[i].cgroup == cgroups->data[j].cgroup) {
@@ -331,8 +321,8 @@ static void process_data(CgroupVec *cgroups, EntryVec entries, size_t *entries_i
             VECTOR_PUSH(&cgroup->points, point);
         }
 
+        i++;
     }
-    *entries_idx = i;
 
     size_t l = 0, r = cgroups->length - 1;
     while (l < r) {
@@ -387,9 +377,7 @@ int main(void) {
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
 
-    bool is_first_entry = true;
-    bool running = true;     // TODO: rename
-    size_t entries_idx = 0;  // TODO: move
+    bool is_child_running = true;
 
     int min_time_s;
     int max_time_s;
@@ -400,20 +388,30 @@ int main(void) {
     uint32_t max_latency_us = 0;
     double ts_per_px;
     double latency_per_px;
+
     while (!WindowShouldClose()) {
-        if (running) {
-            parse_output(&entries, child, input_fd);
+        // Data
+        if (is_child_running) {
+            if (read_entries(&entries, input_fd) != 0) {
+                int status;
+                waitpid(child, &status, 0);
+                status = WEXITSTATUS(status);
+
+                if (status == 0) {
+                    is_child_running = false;
+                } else if (status == ENOENT) {
+                    ERROR("unable to find \"ecli\" to run eBPF program.");
+                } else {
+                    ERROR("eBPF process exited unexpectedly.");
+                }
+            }
             if (entries.length == 0) continue;
 
-            if (is_first_entry) {
-                is_first_entry = false;
-                min_time_s = entries.data[0].time_s;
-            }
-
+            min_time_s = entries.data[0].time_s;
             max_time_s = entries.data[entries.length - 1].time_s;
             time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
 
-            process_data(&cgroups, entries, &entries_idx);
+            group_entries(&cgroups, entries);
 
             for (size_t i = 0; i < cgroups.length; i++) {
                 min_ts_us = MIN(min_ts_us, cgroups.data[i].min_ts_us);
@@ -440,10 +438,7 @@ int main(void) {
         if (IsKeyDown(KEY_UP)) y_scale *= Y_SCALE_SPEED;
         if (IsKeyDown(KEY_DOWN)) y_scale = MAX(y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
 
-        if (IsKeyPressed(KEY_SPACE)) {
-            kill(child, SIGTERM);
-            running = false;
-        }
+        if (IsKeyPressed(KEY_SPACE)) kill(child, SIGTERM);
 
         // Drawing
 
