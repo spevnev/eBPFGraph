@@ -7,6 +7,7 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
+// random values:
 #define MAX_RUNQ_ENTRIES 8192
 #define MAX_EVENT_ENTRIES 8192
 

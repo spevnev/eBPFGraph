@@ -39,8 +39,10 @@ static const int LEGEND_PADDING = 20;
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
 static const Color FOREGROUND = {0xD8, 0xD8, 0xD8, 0xff};
 static const Color GRID_COLOR = {0x33, 0x33, 0x33, 0xff};
-static const Color COLORS[] = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff}, {0x18, 0x18, 0xD8, 0xff},
-                               {0x18, 0xD8, 0xD8, 0xff}, {0xD8, 0x18, 0xD8, 0xff}, {0xD8, 0xD8, 0x18, 0xff}};
+static const Color COLORS[]
+    = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff}, {0x18, 0x18, 0xD8, 0xff}, {0x18, 0xD8, 0xD8, 0xff},
+       {0xD8, 0x18, 0xD8, 0xff}, {0xD8, 0xD8, 0x18, 0xff}, {0xD8, 0x60, 0x60, 0xff}, {0x60, 0xD8, 0x60, 0xff},
+       {0x60, 0x60, 0xD8, 0xff}, {0x60, 0xD8, 0xD8, 0xff}, {0xD8, 0x60, 0xD8, 0xff}, {0xD8, 0xD8, 0x60, 0xff}};
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Grouping
@@ -50,7 +52,7 @@ static const size_t CGROUP_MIN_POINTS = 500;  // TODO: percentage from the bigge
 static const float OFFSET_SPEED = 20.0f;
 static const float X_SCALE_SPEED = 1.05f;
 static const float Y_SCALE_SPEED = 1.05f;
-static const float MIN_Y_SCALE = 0.8f;
+static const float MIN_Y_SCALE = 0.9f;
 
 #define INITIAL_VECTOR_CAPACITY 16
 
@@ -476,7 +478,14 @@ int main(void) {
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
 
             bool is_clicked = button(rec);
-            if (is_clicked) cgroups.data[i].is_enabled = !cgroups.data[i].is_enabled;
+            if (is_clicked) {
+                if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                    for (size_t j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
+                    cgroups.data[i].is_enabled = true;
+                } else {
+                    cgroups.data[i].is_enabled = !cgroups.data[i].is_enabled;
+                }
+            }
 
             snprintf(buffer, 256, "%d", cgroups.data[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
@@ -488,15 +497,14 @@ int main(void) {
             if (!cgroups.data[i].is_enabled) continue;
             Cgroup entry = cgroups.data[i];
 
-            // TODO: refactor?
-            int px = -1;
-            int py = -1;
-            int npx, npy;
+            double px = -1;
+            double py = -1;
+            double npx, npy;
             for (size_t j = 0; j < entry.points.length; j++, px = npx, py = npy) {
                 Point point = entry.points.data[j];
 
-                int x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-                int y = round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
+                double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
+                double y = round((point.total_latency_us / point.count - min_latency_us) / latency_per_px) * y_scale;
 
                 npx = x;
                 npy = y;
@@ -505,10 +513,10 @@ int main(void) {
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
                 if (px == -1) continue;
 
-                int rpx = px;
-                int rpy = py;
-                int rx = x;
-                int ry = y;
+                double rpx = px;
+                double rpy = py;
+                double rx = x;
+                double ry = y;
 
                 if (rpx < 0) {
                     assert(x != px);
