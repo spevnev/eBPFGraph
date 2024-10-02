@@ -55,6 +55,14 @@ static const float X_SCALE_SPEED = 1.05f;
 static const float Y_SCALE_SPEED = 1.05f;
 static const float MIN_Y_SCALE = 0.9f;
 
+#define ERROR(...)                    \
+    do {                              \
+        fprintf(stderr, "ERROR: ");   \
+        fprintf(stderr, __VA_ARGS__); \
+        fprintf(stderr, "\n");        \
+        exit(EXIT_FAILURE);           \
+    } while (0)
+
 #define INITIAL_VECTOR_CAPACITY 16
 
 #define VECTOR_TYPEDEF(name, type) \
@@ -64,26 +72,25 @@ static const float MIN_Y_SCALE = 0.9f;
         type *data;                \
     } name
 
-// TODO: check that vec is not null
 #define VECTOR_PUSH(vec, element)                                                       \
     do {                                                                                \
+        assert((vec) != NULL);                                                          \
         if ((vec)->capacity == 0) {                                                     \
             (vec)->capacity = INITIAL_VECTOR_CAPACITY;                                  \
             (vec)->data = malloc((vec)->capacity * sizeof(*(vec)->data));               \
-            if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: out-of-memory */   \
+            if ((vec)->data == NULL) ERROR("out of memory.");                           \
         } else if ((vec)->capacity == (vec)->length) {                                  \
             (vec)->capacity *= 2;                                                       \
             (vec)->data = realloc((vec)->data, (vec)->capacity * sizeof(*(vec)->data)); \
-            if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: out-of-memory */   \
+            if ((vec)->data == NULL) ERROR("out of memory.");                           \
         }                                                                               \
         (vec)->data[(vec)->length++] = (element);                                       \
     } while (0)
 
-// TODO: check that vec is not null
-#define VECTOR_FREE(vec)                                                          \
-    do {                                                                          \
-        if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: error message */ \
-        free((vec)->data);                                                        \
+#define VECTOR_FREE(vec)                              \
+    do {                                              \
+        assert((vec) != NULL && (vec)->data != NULL); \
+        free((vec)->data);                            \
     } while (0)
 
 typedef struct {
@@ -121,6 +128,34 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
+
+static int start_ebpf(int *ret_read_fd, pid_t *child) {
+    int fds[2];
+    if (pipe(fds) == -1) return 1;
+    int read_fd = fds[0];
+    int write_fd = fds[1];
+
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) return 1;
+
+    pid_t pid = fork();
+    if (pid == -1) return 1;
+    *child = pid;
+
+    if (pid == 0) {
+        // TODO: output on error?
+        if (dup2(write_fd, fileno(stdout)) == -1) exit(EXIT_FAILURE);
+        if (close(read_fd) != 0) exit(EXIT_FAILURE);
+        execlp("ecli", "ecli", "run", "ebpf/package.json", (char *) NULL);
+        if (errno == ENOENT) exit(ENOENT);
+        exit(EXIT_FAILURE);
+    }
+
+    if (fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL) | O_NONBLOCK) == -1) return 1;
+    if (close(write_fd) != 0) return 1;
+
+    *ret_read_fd = read_fd;
+    return 0;
+}
 
 static const char *skip_field(const char *ch) {
     assert(ch != NULL);
@@ -165,9 +200,7 @@ static const char *llong_field(long long *ret, const char *ch) {
     return end;
 }
 
-// TODO: reorder functions
 
-// TODO: rename? read_output? read_data?
 static void parse_output(EntryVec *entries, pid_t child, int fd) {
     assert(entries != NULL);
 
@@ -183,16 +216,16 @@ static void parse_output(EntryVec *entries, pid_t child, int fd) {
 
         int i = 0;
         while (i < length) {
-            int j = i;  // TODO: rename
+            int line_idx = i;
 
             while (i < length && buffer[i] != '\n') i++;
             if (i == length) {
-                buffer_offset = length - j;
-                memmove(buffer, buffer + j, buffer_offset);
+                buffer_offset = length - line_idx;
+                memmove(buffer, buffer + line_idx, buffer_offset);
                 break;
             }
 
-            i++;  // go over that '\n'
+            i++;  // go over '\n'
             if (i == length) buffer_offset = 0;
 
             if (!skipped_header) {
@@ -201,7 +234,7 @@ static void parse_output(EntryVec *entries, pid_t child, int fd) {
             }
 
             Entry entry = {0};
-            const char *ch = buffer + j;
+            const char *ch = buffer + line_idx;
 
             // TIME
             ch = time_field(&entry.time_s, ch);
@@ -323,34 +356,6 @@ static bool button(Rectangle rec) {
     return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-static int start_ebpf(int *ret_read_fd, pid_t *child) {
-    int fds[2];
-    if (pipe(fds) == -1) return 1;
-    int read_fd = fds[0];
-    int write_fd = fds[1];
-
-    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) return 1;
-
-    pid_t pid = fork();
-    if (pid == -1) return 1;
-    *child = pid;
-
-    if (pid == 0) {
-        // TODO: output on error?
-        if (dup2(write_fd, fileno(stdout)) == -1) exit(EXIT_FAILURE);
-        if (close(read_fd) != 0) exit(EXIT_FAILURE);
-        execlp("ecli", "ecli", "run", "ebpf/package.json", (char *) NULL);
-        if (errno == ENOENT) exit(ENOENT);
-        exit(EXIT_FAILURE);
-    }
-
-    if (fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL) | O_NONBLOCK) == -1) return 1;
-    if (close(write_fd) != 0) return 1;
-
-    *ret_read_fd = read_fd;
-    return 0;
-}
-
 int main(void) {
     if (RAYLIB_VERSION_MAJOR != 5) {
         fprintf(stderr, "ERROR: the required raylib version is 5.\n");
@@ -421,6 +426,8 @@ int main(void) {
             latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
         }
 
+        // Controls
+
         if (IsKeyDown(KEY_LEFT)) offset = MAX(offset - 1.0f / (x_scale * OFFSET_SPEED), 0.0f);
         if (IsKeyDown(KEY_RIGHT)) offset = MIN(offset + 1.0f / (OFFSET_SPEED * x_scale), 1.0f - 1.0f / x_scale);
 
@@ -438,11 +445,11 @@ int main(void) {
             running = false;
         }
 
+        // Drawing
+
         BeginDrawing();
         ClearBackground(BACKGROUND);
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-
-        // TODO: start bpf and read output
 
         char buffer[256];
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
@@ -519,6 +526,7 @@ int main(void) {
                 npy = y;
 
                 if (x < 0) continue;
+                if (x > INNER_WIDTH && px > INNER_WIDTH) break;
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
                 if (px == -1) continue;
 
@@ -554,8 +562,6 @@ int main(void) {
 
                 DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
                          entry.color);
-
-                if (x >= INNER_WIDTH) break;
             }
         }
 
