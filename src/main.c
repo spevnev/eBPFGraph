@@ -5,12 +5,14 @@
 #include <linux/prctl.h>
 #include <math.h>
 #include <raylib.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // Window
@@ -42,7 +44,7 @@ static const Color COLORS[] = {{0xD8, 0x18, 0x18, 0xff}, {0x18, 0xD8, 0x18, 0xff
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Grouping
-static const size_t CGROUP_MIN_POINTS = 500;
+static const size_t CGROUP_MIN_POINTS = 500;  // TODO: percentage from the biggest one?
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
@@ -50,10 +52,36 @@ static const float X_SCALE_SPEED = 1.05f;
 static const float Y_SCALE_SPEED = 1.05f;
 static const float MIN_Y_SCALE = 0.8f;
 
-// Memory
-static const size_t DEFAULT_ENTRIES_CAPACITY = 65536;
-static const size_t DEFAULT_CGROUPS_CAPACITY = 64;
-static const size_t DEFAULT_POINTS_CAPACITY = 16384;
+#define INITIAL_VECTOR_CAPACITY 16
+
+#define VECTOR_TYPEDEF(name, type) \
+    typedef struct {               \
+        size_t capacity;           \
+        size_t length;             \
+        type *data;                \
+    } name
+
+// TODO: check that vec is not null
+#define VECTOR_PUSH(vec, element)                                                       \
+    do {                                                                                \
+        if ((vec)->capacity == 0) {                                                     \
+            (vec)->capacity = INITIAL_VECTOR_CAPACITY;                                  \
+            (vec)->data = malloc((vec)->capacity * sizeof(*(vec)->data));               \
+            if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: out-of-memory */   \
+        } else if ((vec)->capacity == (vec)->length) {                                  \
+            (vec)->capacity *= 2;                                                       \
+            (vec)->data = realloc((vec)->data, (vec)->capacity * sizeof(*(vec)->data)); \
+            if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: out-of-memory */   \
+        }                                                                               \
+        (vec)->data[(vec)->length++] = (element);                                       \
+    } while (0)
+
+// TODO: check that vec is not null
+#define VECTOR_FREE(vec)                                                          \
+    do {                                                                          \
+        if ((vec)->data == NULL) exit(EXIT_FAILURE); /* // TODO: error message */ \
+        free((vec)->data);                                                        \
+    } while (0)
 
 typedef struct {
     int time_s;
@@ -62,24 +90,27 @@ typedef struct {
     uint32_t latency_ns;
 } Entry;
 
+VECTOR_TYPEDEF(EntryVec, Entry);
+
 typedef struct {
     uint64_t ts_us;
     uint32_t latency_us;
 } Point;
 
+VECTOR_TYPEDEF(PointVec, Point);
+
 typedef struct {
+    bool is_enabled;
     int32_t cgroup;
     Color color;
-
     uint64_t min_ts_us;
     uint64_t max_ts_us;
     uint32_t min_latency_us;
     uint32_t max_latency_us;
-
-    size_t points_capacity;
-    size_t points_len;
-    Point *points;
+    PointVec points;
 } Cgroup;
+
+VECTOR_TYPEDEF(CgroupVec, Cgroup);
 
 #define MeasureText2(text, font_size) \
     MeasureTextEx(GetFontDefault(), (text), (font_size), (font_size) / GetFontDefault().baseSize)
@@ -130,106 +161,119 @@ static const char *llong_field(long long *ret, const char *ch) {
     return end;
 }
 
-static void parse_output(Entry **ret_entries, size_t *ret_entries_len, FILE *fp) {
-    assert(ret_entries != NULL && ret_entries_len != NULL && fp != NULL);
+// TODO: reorder functions
 
-    size_t entries_capacity = DEFAULT_ENTRIES_CAPACITY;
-    size_t entries_len = 0;
-    Entry *entries = malloc(entries_capacity * sizeof(*entries));
+// TODO: rename? read_output? read_data?
+static void parse_output(EntryVec *entries, pid_t child, int fd) {
     assert(entries != NULL);
 
-    bool skipped_header = false;
-    ssize_t read;
-    char *line;
-    size_t line_len;
-    while ((read = getline(&line, &line_len, fp)) != -1) {
-        if (!skipped_header) {
-            skipped_header = true;
-            continue;
-        }
+    // TODO: make non-static:
+    static bool skipped_header = false;
+    const int buffer_size = 512;  // TODO: resize + move
+    static char buffer[512];      // TODO: must be able to hold at least on full line -> assumption
+    static int buffer_offset = 0;
 
-        const char *ch = line;
+    ssize_t bytes;
+    while ((bytes = read(fd, buffer + buffer_offset, buffer_size - buffer_offset)) > 0) {
+        int length = buffer_offset + bytes;
 
-        // TIME
-        int time_s;
-        ch = time_field(&time_s, ch);
-        assert(0 <= time_s);
-        entries[entries_len].time_s = time_s;
+        int i = 0;
+        while (i < length) {
+            int j = i;  // TODO: rename
 
-        // PREV_CGROUP
-        ch = skip_field(ch);
+            while (i < length && buffer[i] != '\n') i++;
+            if (i == length) {
+                buffer_offset = length - j;
+                memmove(buffer, buffer + j, buffer_offset);
+                break;
+            }
 
-        // CGROUP
-        long long cgroup;
-        ch = llong_field(&cgroup, ch);
-        assert(0 <= cgroup && cgroup <= INT32_MAX);
-        entries[entries_len].cgroup = cgroup;
+            i++;  // go over that '\n'
+            if (i == length) buffer_offset = 0;
 
-        // RUNQ_LATENCY
-        long long latency_ns;
-        ch = llong_field(&latency_ns, ch);
-        assert(0 <= latency_ns && latency_ns <= UINT32_MAX);
-        entries[entries_len].latency_ns = latency_ns;
+            if (!skipped_header) {
+                skipped_header = true;
+                continue;
+            }
 
-        // TS
-        long long ts_ns;
-        ch = llong_field(&ts_ns, ch);
-        assert(0 <= ts_ns);
-        entries[entries_len].ts_ns = ts_ns;
+            Entry entry = {0};
+            const char *ch = buffer + j;
 
-        entries_len++;
-        if (entries_len == entries_capacity) {
-            entries_capacity *= 2;
-            entries = realloc(entries, entries_capacity * sizeof(*entries));
-            assert(entries != NULL);
+            // TIME
+            ch = time_field(&entry.time_s, ch);
+            assert(0 <= entry.time_s);
+
+            // PREV_CGROUP
+            ch = skip_field(ch);
+
+            // CGROUP
+            long long cgroup;
+            ch = llong_field(&cgroup, ch);
+            assert(0 <= cgroup && cgroup <= INT32_MAX);
+            entry.cgroup = cgroup;
+
+            // RUNQ_LATENCY
+            long long latency_ns;
+            ch = llong_field(&latency_ns, ch);
+            assert(0 <= latency_ns && latency_ns <= UINT32_MAX);
+            entry.latency_ns = latency_ns;
+
+            // TS
+            long long ts_ns;
+            ch = llong_field(&ts_ns, ch);
+            assert(0 <= ts_ns);
+            entry.ts_ns = ts_ns;
+
+            assert(*ch == '\n');
+
+            VECTOR_PUSH(entries, entry);
         }
     }
-    if (line) free(line);
 
-    *ret_entries = entries;
-    *ret_entries_len = entries_len;
+    if (bytes == 0) {
+        // TODO: do this outside if this functions returns 1?
+        int status;
+        waitpid(child, &status, 0);
+        status = WEXITSTATUS(status);
+
+        // TODO: what if status == 0?
+        if (status == ENOENT) fprintf(stderr, "ERROR: unable to find \"ecli\" to run eBPF program.\n");
+        else fprintf(stderr, "ERROR: eBPF process exited unexpectedly.\n");
+        abort();  // TODO:
+    }
+    if (bytes == -1 && errno != EAGAIN) abort();  // TODO:
 }
 
-static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *entries, size_t entries_len) {
-    assert(ret_cgroups != NULL && ret_cgroups_len != NULL && entries != NULL);
-
-    size_t cgroups_capacity = DEFAULT_CGROUPS_CAPACITY;
-    size_t cgroups_len = 0;
-    Cgroup *cgroups = malloc(cgroups_capacity * sizeof(*cgroups));
+static void process_data(CgroupVec *cgroups, EntryVec entries, size_t *entries_idx) {
     assert(cgroups != NULL);
 
-    for (size_t i = 0; i < entries_len; i++) {
+    size_t i;  // TODO: refactor
+    for (i = *entries_idx; i < entries.length; i++) {
         Cgroup *cgroup = NULL;
-        for (size_t j = 0; j < cgroups_len; j++) {
-            if (entries[i].cgroup == cgroups[j].cgroup) {
-                cgroup = &cgroups[j];
+        for (size_t j = 0; j < cgroups->length; j++) {
+            if (entries.data[i].cgroup == cgroups->data[j].cgroup) {
+                cgroup = &cgroups->data[j];
                 break;
             }
         }
 
         if (cgroup == NULL) {
-            cgroup = &cgroups[cgroups_len];
-            cgroup->cgroup = entries[i].cgroup;
-            cgroup->color = COLORS[cgroups_len % COLORS_LEN];
-            cgroup->min_ts_us = UINT64_MAX;
-            cgroup->max_ts_us = 0;
-            cgroup->min_latency_us = UINT32_MAX;
-            cgroup->max_latency_us = 0;
-            cgroup->points_capacity = DEFAULT_POINTS_CAPACITY;
-            cgroup->points_len = 0;
-            cgroup->points = malloc(cgroup->points_capacity * sizeof(*cgroups[i].points));
-            assert(cgroup->points != NULL);
-            cgroups_len++;
-
-            if (cgroups_len == cgroups_capacity) {
-                cgroups_capacity *= 2;
-                cgroups = realloc(cgroups, cgroups_capacity * sizeof(*cgroups));
-                assert(cgroups != NULL);
-            }
+            Cgroup new_cgroup = {
+                .is_enabled = true,
+                .cgroup = entries.data[i].cgroup,
+                .color = COLORS[cgroups->length % COLORS_LEN],
+                .min_ts_us = UINT64_MAX,
+                .max_ts_us = 0,
+                .min_latency_us = UINT32_MAX,
+                .max_latency_us = 0,
+                .points = {0},
+            };
+            VECTOR_PUSH(cgroups, new_cgroup);
+            cgroup = &cgroups->data[cgroups->length - 1];
         }
 
-        uint64_t latency_us = entries[i].latency_ns / 1000;
-        uint32_t ts_us = entries[i].ts_ns / 1000;
+        uint64_t latency_us = entries.data[i].latency_ns / 1000;
+        uint32_t ts_us = entries.data[i].ts_ns / 1000;
 
         cgroup->min_ts_us = MIN(cgroup->min_ts_us, ts_us);
         cgroup->max_ts_us = MAX(cgroup->max_ts_us, ts_us);
@@ -238,52 +282,26 @@ static void process_data(Cgroup **ret_cgroups, size_t *ret_cgroups_len, Entry *e
 
         // TODO: batch & average
 
-        cgroup->points[cgroup->points_len].latency_us = latency_us;
-        cgroup->points[cgroup->points_len].ts_us = ts_us;
-        cgroup->points_len++;
-
-        if (cgroup->points_len == cgroup->points_capacity) {
-            cgroup->points_capacity *= 2;
-            cgroup->points = realloc(cgroup->points, cgroup->points_capacity * sizeof(*cgroup->points));
-            assert(cgroup->points != NULL);
-        }
+        Point point = {
+            .latency_us = latency_us,
+            .ts_us = ts_us,
+        };
+        VECTOR_PUSH(&cgroup->points, point);
     }
+    *entries_idx = i;
 
-    size_t l = 0, r = cgroups_len - 1;
+    size_t l = 0, r = cgroups->length - 1;
     while (l < r) {
-        while (l < r && cgroups[l].points_len >= CGROUP_MIN_POINTS) l++;
-        while (l < r && cgroups[r].points_len < CGROUP_MIN_POINTS) r--;
+        while (l < r && cgroups->data[l].points.length >= CGROUP_MIN_POINTS) l++;
+        while (l < r && cgroups->data[r].points.length < CGROUP_MIN_POINTS) r--;
         if (l < r) {
-            Cgroup temp = cgroups[l];
-            cgroups[l] = cgroups[r];
-            cgroups[r] = temp;
+            Cgroup temp = cgroups->data[l];
+            cgroups->data[l] = cgroups->data[r];
+            cgroups->data[r] = temp;
             l++;
             r--;
         }
     }
-
-    // TODO: group into "others" line; requires merging points
-    //     l++;
-    //     Cgroup *other = &cgroups[l];
-    //     size_t others_len = 0;
-    //     for (size_t i = l; i < cgroups_len; i++) others_len += cgroups[i].points_len;
-    //     if (other->points_capacity < others_len) {
-    //         other->points = realloc(other->points, others_len * sizeof(*other->points));
-    //         assert(other->points != NULL);
-    //     }
-    //
-    //     other->cgroup = -1;
-    //     for (size_t i = l + 1; i < cgroups_len; i++) {
-    //         memcpy(other->points + other->points_len, cgroups[i].points,
-    //                cgroups[i].points_len * sizeof(*cgroups[i].points));
-    //         other->points_len += cgroups[i].points_len;
-    //     }
-
-    for (size_t i = l; i < cgroups_len; i++) free(cgroups[i].points);
-    cgroups_len = l;
-
-    *ret_cgroups = cgroups;
-    *ret_cgroups_len = cgroups_len;
 }
 
 static bool button(Rectangle rec) {
@@ -294,43 +312,37 @@ static bool button(Rectangle rec) {
     return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-static int start_ebpf(pid_t *child) {
-    int fd[2];
-    if (pipe(fd) == -1) abort();  // TODO:
-    int read_fd = fd[0];
-    int write_fd = fd[1];
+static int start_ebpf(int *ret_read_fd, pid_t *child) {
+    int fds[2];
+    if (pipe(fds) == -1) return 1;
+    int read_fd = fds[0];
+    int write_fd = fds[1];
 
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) return 1;
 
     pid_t pid = fork();
-    if (pid == -1) abort();  // TODO:
+    if (pid == -1) return 1;
+    *child = pid;
 
-    // TODO: error handling:
     if (pid == 0) {
-        dup2(write_fd, STDOUT_FILENO);
-        close(read_fd);
-        // TODO: remove absolute path
-        execle("/home/tx/srcs/eunomia/ecli", "ecli", "run", "ebpf/package.json");
+        // TODO: output on error?
+        if (dup2(write_fd, fileno(stdout)) == -1) exit(EXIT_FAILURE);
+        if (close(read_fd) != 0) exit(EXIT_FAILURE);
+        execlp("ecli", "ecli", "run", "ebpf/package.json", (char *) NULL);
+        if (errno == ENOENT) exit(ENOENT);
         exit(EXIT_FAILURE);
     }
 
-    close(write_fd);
+    if (fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL) | O_NONBLOCK) == -1) return 1;
+    if (close(write_fd) != 0) return 1;
 
-    *child = pid;
-    return read_fd;
+    *ret_read_fd = read_fd;
+    return 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(void) {
     if (RAYLIB_VERSION_MAJOR != 5) {
         fprintf(stderr, "ERROR: the required raylib version is 5.\n");
-        return EXIT_FAILURE;
-    }
-
-    assert(argc > 0);
-    const char *program = argv[0];
-
-    if (argc != 2) {
-        printf("usage: %s <filename>\n", program);
         return EXIT_FAILURE;
     }
 
@@ -339,67 +351,65 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    int input_fd;
     pid_t child;
-    int input_fd = start_ebpf(&child);
-    getchar();
-    kill(child, SIGTERM);
-    close(input_fd);
-
-    if (setgid(1000) != 0 || setuid(1000) != 0) {
-        fprintf(stderr, "ERROR: unable to drop user privileges.\n");
+    if (start_ebpf(&input_fd, &child) != 0) {
+        fprintf(stderr, "ERROR: unable to start eBPF program.\n");
         return EXIT_FAILURE;
     }
 
-    return 0;
-
-    FILE *fp = fopen(argv[1], "r");
-    if (fp == NULL) {
-        fprintf(stderr, "ERROR: unable to open file \"%s\": %s.\n", argv[1], strerror(errno));
-        return EXIT_FAILURE;
-    }
-
-    Entry *entries;
-    size_t entries_len;
-    parse_output(&entries, &entries_len, fp);
-
-    int min_time_s = entries[0].time_s;
-    int max_time_s = entries[entries_len - 1].time_s;
-    double time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
-
-    Cgroup *cgroups;
-    size_t cgroups_len;
-    process_data(&cgroups, &cgroups_len, entries, entries_len);
-
-    free(entries);
-    fclose(fp);
-
-    uint64_t min_ts_us = UINT64_MAX;
-    uint64_t max_ts_us = 0;
-    uint32_t min_latency_us = UINT32_MAX;
-    uint32_t max_latency_us = 0;
-    for (size_t i = 0; i < cgroups_len; i++) {
-        min_ts_us = MIN(min_ts_us, cgroups[i].min_ts_us);
-        max_ts_us = MAX(max_ts_us, cgroups[i].max_ts_us);
-        min_latency_us = MIN(min_latency_us, cgroups[i].min_latency_us);
-        max_latency_us = MAX(max_latency_us, cgroups[i].max_latency_us);
-    }
-
-    double ts_per_px = (max_ts_us - min_ts_us) / ((double) INNER_WIDTH);
-    double latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
+    // TODO: dropping sudo privileges
 
     double offset = 0.0f;
     double x_scale = 1.0f;
     double y_scale = 1.0f;
 
-    bool *enabled_cgroups = malloc(cgroups_len * sizeof(*enabled_cgroups));
-    assert(enabled_cgroups != NULL);
-    memset(enabled_cgroups, true, cgroups_len);
+    EntryVec entries = {0};
+    CgroupVec cgroups = {0};
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
 
+    bool is_first_entry = true;
+    bool running = true;     // TODO: rename
+    size_t entries_idx = 0;  // TODO: move
+
+    int min_time_s;
+    int max_time_s;
+    double time_per_px;
+    uint64_t min_ts_us = UINT64_MAX;
+    uint64_t max_ts_us = 0;
+    uint32_t min_latency_us = UINT32_MAX;
+    uint32_t max_latency_us = 0;
+    double ts_per_px;
+    double latency_per_px;
     while (!WindowShouldClose()) {
+        if (running) {
+            parse_output(&entries, child, input_fd);
+            if (entries.length == 0) continue;
+
+            if (is_first_entry) {
+                is_first_entry = false;
+                min_time_s = entries.data[0].time_s;
+            }
+
+            max_time_s = entries.data[entries.length - 1].time_s;
+            time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
+
+            process_data(&cgroups, entries, &entries_idx);
+
+            for (size_t i = 0; i < cgroups.length; i++) {
+                min_ts_us = MIN(min_ts_us, cgroups.data[i].min_ts_us);
+                max_ts_us = MAX(max_ts_us, cgroups.data[i].max_ts_us);
+                min_latency_us = MIN(min_latency_us, cgroups.data[i].min_latency_us);
+                max_latency_us = MAX(max_latency_us, cgroups.data[i].max_latency_us);
+            }
+
+            ts_per_px = (max_ts_us - min_ts_us) / ((double) INNER_WIDTH);
+            latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
+        }
+
         if (IsKeyDown(KEY_LEFT)) offset = MAX(offset - 1.0f / (x_scale * OFFSET_SPEED), 0.0f);
         if (IsKeyDown(KEY_RIGHT)) offset = MIN(offset + 1.0f / (OFFSET_SPEED * x_scale), 1.0f - 1.0f / x_scale);
 
@@ -412,9 +422,16 @@ int main(int argc, char *argv[]) {
         if (IsKeyDown(KEY_UP)) y_scale *= Y_SCALE_SPEED;
         if (IsKeyDown(KEY_DOWN)) y_scale = MAX(y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
 
+        if (IsKeyPressed(KEY_SPACE)) {
+            kill(child, SIGTERM);
+            running = false;
+        }
+
         BeginDrawing();
         ClearBackground(BACKGROUND);
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+
+        // TODO: start bpf and read output
 
         char buffer[256];
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
@@ -443,7 +460,7 @@ int main(int argc, char *argv[]) {
         }
 
         int w = HOR_PADDING;
-        for (size_t i = 0; i < cgroups_len; i++) {
+        for (size_t i = 0; i < cgroups.length; i++) {
             Rectangle rec = {
                 .x = w,
                 .y = (TOP_PADDING - LEGEND_COLOR_SIZE) / 2,
@@ -451,31 +468,32 @@ int main(int argc, char *argv[]) {
                 .height = LEGEND_FONT_SIZE,
             };
 
-            if (enabled_cgroups[i]) {
-                DrawRectangleRec(rec, cgroups[i].color);
+            if (cgroups.data[i].is_enabled) {
+                DrawRectangleRec(rec, cgroups.data[i].color);
             } else {
-                DrawRectangleLinesEx(rec, LEGEND_COLOR_THICKNESS, cgroups[i].color);
+                DrawRectangleLinesEx(rec, LEGEND_COLOR_THICKNESS, cgroups.data[i].color);
             }
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
 
             bool is_clicked = button(rec);
-            if (is_clicked) enabled_cgroups[i] = !enabled_cgroups[i];
+            if (is_clicked) cgroups.data[i].is_enabled = !cgroups.data[i].is_enabled;
 
-            snprintf(buffer, 256, "%d", cgroups[i].cgroup);
+            snprintf(buffer, 256, "%d", cgroups.data[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
-            DrawText(buffer, w, (TOP_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups[i].color);
+            DrawText(buffer, w, (TOP_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups.data[i].color);
             w += td.x + LEGEND_PADDING;
         }
 
-        for (size_t i = 0; i < cgroups_len; i++) {
-            if (!enabled_cgroups[i]) continue;
-            Cgroup entry = cgroups[i];
+        for (size_t i = 0; i < cgroups.length; i++) {
+            if (!cgroups.data[i].is_enabled) continue;
+            Cgroup entry = cgroups.data[i];
 
+            // TODO: refactor?
             int px = -1;
             int py = -1;
             int npx, npy;
-            for (size_t j = 0; j < entry.points_len; j++, px = npx, py = npy) {
-                Point point = entry.points[j];
+            for (size_t j = 0; j < entry.points.length; j++, px = npx, py = npy) {
+                Point point = entry.points.data[j];
 
                 int x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
                 int y = round((point.latency_us - min_latency_us) / latency_per_px) * y_scale;
@@ -529,9 +547,12 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
-    free(enabled_cgroups);
-    for (size_t i = 0; i < cgroups_len; i++) free(cgroups[i].points);
-    free(cgroups);
+    for (size_t i = 0; i < cgroups.length; i++) VECTOR_FREE(&cgroups.data[i].points);
+    VECTOR_FREE(&cgroups);
+    VECTOR_FREE(&entries);
+
+    kill(child, SIGTERM);
+    close(input_fd);
 
     return EXIT_SUCCESS;
 }

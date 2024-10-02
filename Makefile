@@ -3,7 +3,7 @@ CFLAGS  := -O2 -std=c17 -Wall -Wextra -pedantic -Isrc -MMD -MP
 LDFLAGS := $(shell pkg-config --libs raylib) -lm
 
 ifeq ($(DEBUG), 1)
-	CFLAGS += -g3 -fstack-protector -fsanitize=address,leak,undefined -DDEBUG
+	CFLAGS += -g3
 endif
 
 BIN_NAME := graph
