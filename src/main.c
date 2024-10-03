@@ -94,7 +94,7 @@ static const float MIN_Y_SCALE = 0.9f;
     } while (0)
 
 typedef struct {
-    int time_s;
+    uint32_t time_s;
     uint64_t ts_ns;
     int32_t cgroup;
     uint32_t latency_ns;
@@ -115,10 +115,6 @@ typedef struct {
     bool is_visible;
     int32_t cgroup;
     Color color;
-    uint64_t min_ts_us;
-    uint64_t max_ts_us;
-    uint32_t min_latency_us;
-    uint32_t max_latency_us;
     PointVec points;
 } Cgroup;
 
@@ -130,20 +126,19 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
 
-static int start_ebpf(int *ret_read_fd, pid_t *child) {
+static void start_ebpf(int *ret_read_fd, pid_t *child) {
     int fds[2];
-    if (pipe(fds) == -1) return 1;
+    if (pipe(fds) == -1) ERROR("unable to create pipe.");
     int read_fd = fds[0];
     int write_fd = fds[1];
 
-    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) return 1;
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) ERROR("unable to set PDEATHSIG for eBPF process.");
 
     pid_t pid = fork();
-    if (pid == -1) return 1;
+    if (pid == -1) ERROR("unable to fork.");
     *child = pid;
 
     if (pid == 0) {
-        // TODO: output on error?
         if (dup2(write_fd, fileno(stdout)) == -1) exit(EXIT_FAILURE);
         if (close(read_fd) != 0) exit(EXIT_FAILURE);
         execlp("ecli", "ecli", "run", "ebpf/package.json", (char *) NULL);
@@ -151,11 +146,12 @@ static int start_ebpf(int *ret_read_fd, pid_t *child) {
         exit(EXIT_FAILURE);
     }
 
-    if (fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL) | O_NONBLOCK) == -1) return 1;
-    if (close(write_fd) != 0) return 1;
+    if (close(write_fd) != 0) ERROR("unable to close pipe's write end.");
+    if (fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL) | O_NONBLOCK) == -1) {
+        ERROR("unable to make pipe's read end non-blocking.");
+    }
 
     *ret_read_fd = read_fd;
-    return 0;
 }
 
 static const char *skip_field(const char *ch) {
@@ -167,7 +163,7 @@ static const char *skip_field(const char *ch) {
     return ch;
 }
 
-static const char *time_field(int *ret_s, const char *ch) {
+static const char *time_field(uint32_t *ret_s, const char *ch) {
     assert(ret_s != NULL && ch != NULL);
 
     while (*ch == ' ') ch++;
@@ -200,7 +196,6 @@ static const char *llong_field(long long *ret, const char *ch) {
 
     return end;
 }
-
 
 static int read_entries(EntryVec *entries, int fd) {
     assert(entries != NULL);
@@ -238,7 +233,6 @@ static int read_entries(EntryVec *entries, int fd) {
 
             // TIME
             ch = time_field(&entry.time_s, ch);
-            assert(0 <= entry.time_s);
 
             // PREV_CGROUP
             ch = skip_field(ch);
@@ -272,10 +266,12 @@ static int read_entries(EntryVec *entries, int fd) {
     return 0;
 }
 
-static void group_entries(CgroupVec *cgroups, EntryVec entries) {
+static uint32_t group_entries(CgroupVec *cgroups, EntryVec entries) {
     assert(cgroups != NULL);
 
     static size_t i = 0;
+
+    uint32_t current_max_latency = 0;
     while (i < entries.length) {
         Cgroup *cgroup = NULL;
         for (size_t j = 0; j < cgroups->length; j++) {
@@ -290,10 +286,6 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
                 .is_enabled = true,
                 .cgroup = entries.data[i].cgroup,
                 .color = COLORS[cgroups->length % COLORS_LEN],
-                .min_ts_us = UINT64_MAX,
-                .max_ts_us = 0,
-                .min_latency_us = UINT32_MAX,
-                .max_latency_us = 0,
                 .points = {0},
             };
             VECTOR_PUSH(cgroups, new_cgroup);
@@ -303,17 +295,16 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         uint64_t ts_us = entries.data[i].ts_ns / 1000;
         uint32_t latency_us = entries.data[i].latency_ns / 1000;
 
-        cgroup->min_ts_us = MIN(cgroup->min_ts_us, ts_us);
-        cgroup->max_ts_us = MAX(cgroup->max_ts_us, ts_us);
-        cgroup->min_latency_us = MIN(cgroup->min_latency_us, latency_us);
-        cgroup->max_latency_us = MAX(cgroup->max_latency_us, latency_us);
-
-        if (cgroup->points.length > 0
-            && ts_us - cgroup->points.data[cgroup->points.length - 1].ts_us < CGROUP_BATCHING_TIME_US) {
-            Point *last = &cgroup->points.data[cgroup->points.length - 1];
+        Point *last = cgroup->points.length > 0 ? &cgroup->points.data[cgroup->points.length - 1] : NULL;
+        if (last != NULL && ts_us - last->ts_us < CGROUP_BATCHING_TIME_US) {
             last->total_latency_us += latency_us;
             last->count++;
         } else {
+            if (last != NULL) {
+                // This doesn't take the very last point into account
+                current_max_latency = MAX(current_max_latency, last->total_latency_us / last->count);
+            }
+
             Point point = {
                 .ts_us = ts_us,
                 .total_latency_us = latency_us,
@@ -328,35 +319,19 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
     for (size_t i = 0; i < cgroups->length; i++) {
         cgroups->data[i].is_visible = cgroups->data[i].points.length >= CGROUP_MIN_POINTS;
     }
-}
 
-static bool button(Rectangle rec) {
-    bool is_mouse_over = CheckCollisionPointRec(GetMousePosition(), rec);
-    if (!is_mouse_over) return false;
-
-    SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
-    return IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return current_max_latency;
 }
 
 int main(void) {
-    if (RAYLIB_VERSION_MAJOR != 5) {
-        fprintf(stderr, "ERROR: the required raylib version is 5.\n");
-        return EXIT_FAILURE;
-    }
+    if (RAYLIB_VERSION_MAJOR != 5) ERROR("the required raylib version is 5.");
 
-    if (geteuid() != 0) {
-        fprintf(stderr, "ERROR: must be ran as root.\n");
-        return EXIT_FAILURE;
-    }
+    if (geteuid() != 0) ERROR("must be ran as root.");
 
+    bool is_child_running = true;
     int input_fd;
     pid_t child;
-    if (start_ebpf(&input_fd, &child) != 0) {
-        fprintf(stderr, "ERROR: unable to start eBPF program.\n");
-        return EXIT_FAILURE;
-    }
-
-    // TODO: dropping sudo privileges
+    start_ebpf(&input_fd, &child);
 
     double offset = 0.0f;
     double x_scale = 1.0f;
@@ -365,17 +340,14 @@ int main(void) {
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
 
-    bool is_child_running = true;
-
-    int min_time_s;
-    int max_time_s;
+    uint32_t min_time_s = UINT32_MAX;
+    uint32_t max_time_s = 0;
     uint64_t min_ts_us = UINT64_MAX;
     uint64_t max_ts_us = 0;
-    uint32_t min_latency_us = UINT32_MAX;
     uint32_t max_latency_us = 0;
-    double time_per_px;
-    double ts_per_px;
-    double latency_per_px;
+    double time_per_px = 0;
+    double ts_per_px = 0;
+    double latency_per_px = 0;
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
@@ -399,21 +371,19 @@ int main(void) {
             }
             if (entries.length == 0) continue;
 
+            min_ts_us = entries.data[0].ts_ns / 1000;
+            max_ts_us = entries.data[entries.length - 1].ts_ns / 1000;
+            ts_per_px = (max_ts_us - min_ts_us) / ((double) INNER_WIDTH);
+
             min_time_s = entries.data[0].time_s;
             max_time_s = entries.data[entries.length - 1].time_s;
             time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
 
-            group_entries(&cgroups, entries);
+            uint32_t current_max_latency_us = group_entries(&cgroups, entries);
 
-            for (size_t i = 0; i < cgroups.length; i++) {
-                min_ts_us = MIN(min_ts_us, cgroups.data[i].min_ts_us);
-                max_ts_us = MAX(max_ts_us, cgroups.data[i].max_ts_us);
-                min_latency_us = MIN(min_latency_us, cgroups.data[i].min_latency_us);
-                max_latency_us = MAX(max_latency_us, cgroups.data[i].max_latency_us);
-            }
-
-            ts_per_px = (max_ts_us - min_ts_us) / ((double) INNER_WIDTH);
-            latency_per_px = (max_latency_us - min_latency_us) / ((double) INNER_HEIGHT);
+            // Min latency assumed to be 0
+            max_latency_us = MAX(max_latency_us, current_max_latency_us);
+            latency_per_px = max_latency_us / ((double) INNER_HEIGHT);
         }
 
         // Controls
@@ -458,7 +428,7 @@ int main(void) {
             int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
             DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
-            uint32_t latency_us = min_latency_us + latency_per_px * i * GRID_SIZE / y_scale;
+            uint32_t latency_us = latency_per_px * i * GRID_SIZE / y_scale;
             snprintf(buffer, 256, "%u", (unsigned int) latency_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
@@ -483,13 +453,17 @@ int main(void) {
             }
             w += LEGEND_COLOR_SIZE + LEGEND_COLOR_PADDING;
 
-            bool is_clicked = button(rec);
-            if (is_clicked) {
-                if (IsKeyDown(KEY_LEFT_SHIFT)) {
-                    for (size_t j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
-                    cgroup->is_enabled = true;
-                } else {
-                    cgroup->is_enabled = !cgroup->is_enabled;
+            bool is_mouse_over = CheckCollisionPointRec(GetMousePosition(), rec);
+            if (is_mouse_over) {
+                SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                        for (size_t j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
+                        cgroup->is_enabled = true;
+                    } else {
+                        cgroup->is_enabled = !cgroup->is_enabled;
+                    }
                 }
             }
 
@@ -510,7 +484,7 @@ int main(void) {
                 Point point = cgroup.points.data[j];
 
                 double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-                double y = (point.total_latency_us / point.count - min_latency_us) / latency_per_px * y_scale;
+                double y = (point.total_latency_us / point.count) / latency_per_px * y_scale;
 
                 npx = x;
                 npy = y;
