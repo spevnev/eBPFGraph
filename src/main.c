@@ -23,7 +23,7 @@ static const int HEIGHT = 900;
 // UI sizes
 static const int HOR_PADDING = 60;
 static const int TOP_PADDING = 60;
-static const int BOT_PADDING = 40;
+static const int BOT_PADDING = 200;
 #define INNER_WIDTH (WIDTH - 2 * HOR_PADDING)
 #define INNER_HEIGHT (HEIGHT - TOP_PADDING - BOT_PADDING)
 static const int GRID_SIZE = 60;
@@ -34,6 +34,7 @@ static const int LEGEND_COLOR_PADDING = 4;
 static const int LEGEND_COLOR_THICKNESS = 2;
 static const int LEGEND_FONT_SIZE = 16;
 static const int LEGEND_PADDING = 20;
+static const int STATS_FONT_SIZE = 14;
 
 // Colors
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
@@ -116,6 +117,11 @@ typedef struct {
     int32_t cgroup;
     Color color;
     PointVec points;
+    // Stats collected for each group over the visible area:
+    uint32_t min_latency_us;
+    uint32_t max_latency_us;
+    uint64_t total_latency_us;
+    int count;
 } Cgroup;
 
 VECTOR_TYPEDEF(CgroupVec, Cgroup);
@@ -349,6 +355,9 @@ int main(void) {
     double ts_per_px = 0;
     double latency_per_px = 0;
 
+    int buffer_size = 256;
+    char buffer[256];
+
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
     SetTargetFPS(30);
@@ -408,28 +417,30 @@ int main(void) {
         ClearBackground(BACKGROUND);
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
-        char buffer[256];
+        int y_axis_y = 0;  // TODO: rename
         for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
             int x = i * GRID_SIZE + HOR_PADDING;
             DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
 
             uint64_t ts_us = min_ts_us + ts_per_px * i * GRID_SIZE / x_scale + (max_ts_us - min_ts_us) * offset;
-            snprintf(buffer, 256, "%llu", (long long unsigned int) ts_us);
+            snprintf(buffer, buffer_size, "%llu", (long long unsigned int) ts_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, x - td.x / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN, AXIS_FONT_SIZE, FOREGROUND);
 
             int time_s = min_time_s + time_per_px * i * GRID_SIZE / x_scale + (max_time_s - min_time_s) * offset;
-            snprintf(buffer, 256, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
-            int tw = MeasureText(buffer, AXIS_FONT_SIZE);
-            DrawText(buffer, x - tw / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN + td.y + TEXT_MARGIN, AXIS_FONT_SIZE,
+            snprintf(buffer, buffer_size, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
+            Vector2 td2 = MeasureText2(buffer, AXIS_FONT_SIZE);
+            DrawText(buffer, x - td2.x / 2, HEIGHT - BOT_PADDING + TEXT_MARGIN + td.y + TEXT_MARGIN, AXIS_FONT_SIZE,
                      FOREGROUND);
+
+            y_axis_y = HEIGHT - BOT_PADDING + TEXT_MARGIN + td.y + TEXT_MARGIN + td2.y + TEXT_MARGIN;
         }
         for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
             int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
             DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
             uint32_t latency_us = latency_per_px * i * GRID_SIZE / y_scale;
-            snprintf(buffer, 256, "%u", (unsigned int) latency_us);
+            snprintf(buffer, buffer_size, "%u", (unsigned int) latency_us);
             Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
             DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
         }
@@ -467,24 +478,30 @@ int main(void) {
                 }
             }
 
-            snprintf(buffer, 256, "%d", cgroups.data[i].cgroup);
+            snprintf(buffer, buffer_size, "%d", cgroups.data[i].cgroup);
             Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
             DrawText(buffer, w, (TOP_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups.data[i].color);
             w += td.x + LEGEND_PADDING;
         }
 
         for (size_t i = 0; i < cgroups.length; i++) {
-            Cgroup cgroup = cgroups.data[i];
-            if (!cgroup.is_visible || !cgroup.is_enabled) continue;
+            Cgroup *cgroup = &cgroups.data[i];
+            if (!cgroup->is_visible || !cgroup->is_enabled) continue;
+
+            cgroup->min_latency_us = UINT32_MAX;
+            cgroup->max_latency_us = 0;
+            cgroup->total_latency_us = 0;
+            cgroup->count = 0;
 
             double px = -1;
             double py = -1;
             double npx, npy;
-            for (size_t j = 0; j < cgroup.points.length; j++, px = npx, py = npy) {
-                Point point = cgroup.points.data[j];
+            for (size_t j = 0; j < cgroup->points.length; j++, px = npx, py = npy) {
+                Point point = cgroup->points.data[j];
+                uint32_t latency = point.total_latency_us / point.count;
 
                 double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-                double y = (point.total_latency_us / point.count) / latency_per_px * y_scale;
+                double y = latency / latency_per_px * y_scale;
 
                 npx = x;
                 npy = y;
@@ -493,6 +510,11 @@ int main(void) {
                 if (x > INNER_WIDTH && px > INNER_WIDTH) break;
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
                 if (px == -1) continue;
+
+                cgroup->min_latency_us = MIN(cgroup->min_latency_us, latency);
+                cgroup->max_latency_us = MAX(cgroup->max_latency_us, latency);
+                cgroup->total_latency_us += latency;
+                cgroup->count++;
 
                 double rpx = px;
                 double rpy = py;
@@ -525,8 +547,20 @@ int main(void) {
                 }
 
                 DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
-                         cgroup.color);
+                         cgroup->color);
             }
+        }
+
+        int h = y_axis_y;
+        for (size_t i = 0; i < cgroups.length; i++) {
+            Cgroup cgroup = cgroups.data[i];
+            if (!cgroup.is_visible || !cgroup.is_enabled) continue;
+
+            snprintf(buffer, buffer_size, "%uus %uus %luus", cgroup.min_latency_us, cgroup.max_latency_us,
+                     cgroup.total_latency_us / cgroup.count);
+            DrawText(buffer, HOR_PADDING, h, STATS_FONT_SIZE, FOREGROUND);
+            Vector2 td = MeasureText2(buffer, STATS_FONT_SIZE);
+            h += td.y + TEXT_MARGIN;
         }
 
         EndDrawing();
