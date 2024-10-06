@@ -34,7 +34,8 @@ static const int LEGEND_COLOR_PADDING = 4;
 static const int LEGEND_COLOR_THICKNESS = 2;
 static const int LEGEND_FONT_SIZE = 16;
 static const int LEGEND_PADDING = 20;
-static const int STATS_FONT_SIZE = 14;
+static const int STATS_FONT_SIZE = 20;
+static const int STATS_COLUMN_PADDING = 25;
 
 // Colors
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
@@ -484,20 +485,61 @@ void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale
 }
 
 void draw_stats(int start_y, CgroupVec cgroups) {
-    // TODO: render in columns
-    // TODO: break on overflow
-    // TODO: scrolling?
-
-    int y = start_y;
+    Vector2 group_column_dim = MeasureText2("Group", STATS_FONT_SIZE);
+    int group_column_width = group_column_dim.x;
+    int min_column_width = MeasureText("Min", STATS_FONT_SIZE);
+    int max_column_width = MeasureText("Max", STATS_FONT_SIZE);
+    int avg_column_width = MeasureText("Avg", STATS_FONT_SIZE);
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
-        snprintf(buffer, BUFFER_SIZE, "%uus %uus %luus", cgroup.min_latency_us, cgroup.max_latency_us,
-                 cgroup.total_latency_us / cgroup.count);
-        DrawText(buffer, HOR_PADDING, y, STATS_FONT_SIZE, FOREGROUND);
+        snprintf(buffer, BUFFER_SIZE, "%d", cgroup.cgroup);
+        group_column_width = MAX(group_column_width, MeasureText(buffer, STATS_FONT_SIZE));
+
+        snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_latency_us);
+        min_column_width = MAX(min_column_width, MeasureText(buffer, STATS_FONT_SIZE));
+
+        snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.max_latency_us);
+        max_column_width = MAX(max_column_width, MeasureText(buffer, STATS_FONT_SIZE));
+
+        uint32_t avg = cgroup.total_latency_us / cgroup.count;
+        snprintf(buffer, BUFFER_SIZE, "%uus", avg);
+        avg_column_width = MAX(avg_column_width, MeasureText(buffer, STATS_FONT_SIZE));
+    }
+
+    int group_column_x = HOR_PADDING;
+    int min_column_x = group_column_x + group_column_width + STATS_COLUMN_PADDING;
+    int max_column_x = min_column_x + min_column_width + STATS_COLUMN_PADDING;
+    int avg_column_x = max_column_x + max_column_width + STATS_COLUMN_PADDING;
+
+    int y = start_y;
+    DrawText("Group", group_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+    DrawText("Min", min_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+    DrawText("Max", max_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+    DrawText("Avg", avg_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+    y += group_column_dim.y + TEXT_MARGIN;
+
+    for (size_t i = 0; i < cgroups.length; i++) {
+        Cgroup cgroup = cgroups.data[i];
+        if (!cgroup.is_visible || !cgroup.is_enabled) continue;
+
+        snprintf(buffer, BUFFER_SIZE, "%d", cgroup.cgroup);
         Vector2 td = MeasureText2(buffer, STATS_FONT_SIZE);
+        DrawText(buffer, group_column_x, y, STATS_FONT_SIZE, cgroup.color);
+
+        snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_latency_us);
+        DrawText(buffer, min_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+
+        snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.max_latency_us);
+        DrawText(buffer, max_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+
+        uint32_t avg = cgroup.total_latency_us / cgroup.count;
+        snprintf(buffer, BUFFER_SIZE, "%uus", avg);
+        DrawText(buffer, avg_column_x, y, STATS_FONT_SIZE, FOREGROUND);
+
         y += td.y + TEXT_MARGIN;
+        if (y >= HEIGHT) break;
     }
 }
 
