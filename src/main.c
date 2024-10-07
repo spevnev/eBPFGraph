@@ -22,13 +22,15 @@ static const int HEIGHT = 900;
 
 // UI sizes
 static const int HOR_PADDING = 60;
-static const int TOP_PADDING = 60;
-static const int BOT_PADDING = 200;
+static const int TOP_PADDING = 75;
+static const int BOT_PADDING = 150;
 #define INNER_WIDTH (WIDTH - 2 * HOR_PADDING)
 #define INNER_HEIGHT (HEIGHT - TOP_PADDING - BOT_PADDING)
 static const int GRID_SIZE = 60;
-static const int AXIS_FONT_SIZE = 10;
+static const int AXIS_NAME_FONT_SIZE = 14;
+static const int AXIS_VALUE_FONT_SIZE = 10;
 static const int TEXT_MARGIN = 4;
+static const int LEGEND_TOP_MARGIN = 25;
 static const int LEGEND_COLOR_SIZE = 16;
 static const int LEGEND_COLOR_PADDING = 4;
 static const int LEGEND_COLOR_THICKNESS = 2;
@@ -356,14 +358,14 @@ static int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint3
 
         uint64_t ts_us = min_ts_us + ts_per_px * i * GRID_SIZE / x_scale + (max_ts_us - min_ts_us) * offset;
         snprintf(buffer, BUFFER_SIZE, "%llu", (long long unsigned int) ts_us);
-        Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
-        DrawText(buffer, x - td.x / 2, y, AXIS_FONT_SIZE, FOREGROUND);
+        Vector2 td = MeasureText2(buffer, AXIS_VALUE_FONT_SIZE);
+        DrawText(buffer, x - td.x / 2, y, AXIS_VALUE_FONT_SIZE, FOREGROUND);
         y += td.y + TEXT_MARGIN;
 
         int time_s = min_time_s + time_per_px * i * GRID_SIZE / x_scale + (max_time_s - min_time_s) * offset;
         snprintf(buffer, BUFFER_SIZE, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
-        Vector2 td2 = MeasureText2(buffer, AXIS_FONT_SIZE);
-        DrawText(buffer, x - td2.x / 2, y, AXIS_FONT_SIZE, FOREGROUND);
+        Vector2 td2 = MeasureText2(buffer, AXIS_VALUE_FONT_SIZE);
+        DrawText(buffer, x - td2.x / 2, y, AXIS_VALUE_FONT_SIZE, FOREGROUND);
         y += td2.y + TEXT_MARGIN;
 
         max_y = MAX(max_y, y);
@@ -374,19 +376,26 @@ static int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint3
 
 static void draw_y_axis(double latency_y_scale, double latency_per_px, double preempts_y_scale,
                         double preempts_per_px) {
+    Vector2 td = MeasureText2("Latency (us)", AXIS_NAME_FONT_SIZE);
+    DrawText("Latency (us)", HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_NAME_FONT_SIZE, FOREGROUND);
+
+    td = MeasureText2("Preemptions", AXIS_NAME_FONT_SIZE);
+    DrawText("Preemptions", WIDTH - HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_NAME_FONT_SIZE,
+             FOREGROUND);
+
     for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
         int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
         DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
         uint32_t latency_us = latency_per_px * i * GRID_SIZE / latency_y_scale;
         snprintf(buffer, BUFFER_SIZE, "%u", (unsigned int) latency_us);
-        Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
-        DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
+        td = MeasureText2(buffer, AXIS_VALUE_FONT_SIZE);
+        DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_VALUE_FONT_SIZE, FOREGROUND);
 
         uint32_t preempts = preempts_per_px * i * GRID_SIZE / preempts_y_scale;
         snprintf(buffer, BUFFER_SIZE, "%u", (unsigned int) preempts);
-        td = MeasureText2(buffer, AXIS_FONT_SIZE);
-        DrawText(buffer, WIDTH - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
+        td = MeasureText2(buffer, AXIS_VALUE_FONT_SIZE);
+        DrawText(buffer, WIDTH - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_VALUE_FONT_SIZE, FOREGROUND);
     }
 }
 
@@ -398,7 +407,7 @@ static void draw_legend(CgroupVec cgroups) {
 
         Rectangle rec = {
             .x = x,
-            .y = (TOP_PADDING - LEGEND_COLOR_SIZE) / 2,
+            .y = LEGEND_TOP_MARGIN - LEGEND_COLOR_SIZE / 2,
             .width = LEGEND_COLOR_SIZE,
             .height = LEGEND_FONT_SIZE,
         };
@@ -426,7 +435,7 @@ static void draw_legend(CgroupVec cgroups) {
 
         snprintf(buffer, BUFFER_SIZE, "%d", cgroups.data[i].cgroup);
         Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
-        DrawText(buffer, x, (TOP_PADDING - td.y) / 2, LEGEND_FONT_SIZE, cgroups.data[i].color);
+        DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroups.data[i].color);
         x += td.x + LEGEND_PADDING;
     }
 }
@@ -649,7 +658,6 @@ int main(void) {
             // Min latency and preemptions are assumed to be 0
             latency_per_px = max_latency_us / ((double) INNER_HEIGHT);
             preempts_per_px = max_preempts / ((double) INNER_HEIGHT);
-            printf("%u\n", max_preempts);
         }
 
         // Controls
