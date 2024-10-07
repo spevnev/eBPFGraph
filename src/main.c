@@ -93,6 +93,8 @@ static char buffer[BUFFER_SIZE];
         (vec)->data[(vec)->length++] = (element);                                       \
     } while (0)
 
+#define VECTOR_LAST(vec) ((vec)->length > 0 ? &(vec)->data[(vec)->length - 1] : NULL)
+
 #define VECTOR_FREE(vec)                                             \
     do {                                                             \
         if ((vec) != NULL && (vec)->data != NULL) free((vec)->data); \
@@ -299,28 +301,20 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, int32_t id) {
     return &cgroups->data[cgroups->length - 1];
 }
 
-static void group_entries(uint32_t *max_latency_us, uint32_t *max_preemptions, CgroupVec *cgroups, EntryVec entries) {
-    assert(max_latency_us != NULL && max_preemptions != NULL && cgroups != NULL);
+static void group_entries(uint32_t *max_latency_us, uint32_t *max_preempts, CgroupVec *cgroups, EntryVec entries) {
+    assert(max_latency_us != NULL && max_preempts != NULL && cgroups != NULL);
 
     static size_t i = 0;
     while (i < entries.length) {
-        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup);
-        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup);
         uint64_t ts_us = entries.data[i].ts_ns / 1000;
         uint32_t latency_us = entries.data[i].latency_ns / 1000;
 
-        // TODO: generalize somehow
-
-        Preempt *last_preempt
-            = prev_cgroup->preempts.length > 0 ? &prev_cgroup->preempts.data[prev_cgroup->preempts.length - 1] : NULL;
+        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup);
+        Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
         if (last_preempt != NULL && ts_us - last_preempt->ts_us < CGROUP_BATCHING_TIME_US) {
             last_preempt->count++;
+            *max_preempts = MAX(*max_preempts, last_preempt->count);
         } else {
-            if (last_preempt != NULL) {
-                // This doesn't take the very last point into account
-                *max_preemptions = MAX(*max_preemptions, last_preempt->count);
-            }
-
             Preempt preempt = {
                 .ts_us = ts_us,
                 .count = 1,
@@ -328,17 +322,13 @@ static void group_entries(uint32_t *max_latency_us, uint32_t *max_preemptions, C
             VECTOR_PUSH(&prev_cgroup->preempts, preempt);
         }
 
-        Latency *last_latency
-            = cgroup->latencies.length > 0 ? &cgroup->latencies.data[cgroup->latencies.length - 1] : NULL;
+        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup);
+        Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && ts_us - last_latency->ts_us < CGROUP_BATCHING_TIME_US) {
             last_latency->total_latency_us += latency_us;
             last_latency->count++;
+            *max_latency_us = MAX(*max_latency_us, last_latency->total_latency_us / last_latency->count);
         } else {
-            if (last_latency != NULL) {
-                // This doesn't take the very last_latency point into account
-                *max_latency_us = MAX(*max_latency_us, last_latency->total_latency_us / last_latency->count);
-            }
-
             Latency latency = {
                 .ts_us = ts_us,
                 .total_latency_us = latency_us,
@@ -355,8 +345,8 @@ static void group_entries(uint32_t *max_latency_us, uint32_t *max_preemptions, C
     }
 }
 
-int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint32_t max_time_s, uint64_t min_ts_us,
-                uint64_t max_ts_us, double time_per_px, double ts_per_px) {
+static int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint32_t max_time_s, uint64_t min_ts_us,
+                       uint64_t max_ts_us, double time_per_px, double ts_per_px) {
     int max_y = 0;
     for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
         int x = i * GRID_SIZE + HOR_PADDING;
@@ -382,19 +372,25 @@ int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint32_t max
     return max_y;
 }
 
-void draw_y_axis(double y_scale, double latency_per_px) {
+static void draw_y_axis(double latency_y_scale, double latency_per_px, double preempts_y_scale,
+                        double preempts_per_px) {
     for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
         int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
         DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
 
-        uint32_t latency_us = latency_per_px * i * GRID_SIZE / y_scale;
+        uint32_t latency_us = latency_per_px * i * GRID_SIZE / latency_y_scale;
         snprintf(buffer, BUFFER_SIZE, "%u", (unsigned int) latency_us);
         Vector2 td = MeasureText2(buffer, AXIS_FONT_SIZE);
         DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
+
+        uint32_t preempts = preempts_per_px * i * GRID_SIZE / preempts_y_scale;
+        snprintf(buffer, BUFFER_SIZE, "%u", (unsigned int) preempts);
+        td = MeasureText2(buffer, AXIS_FONT_SIZE);
+        DrawText(buffer, WIDTH - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_FONT_SIZE, FOREGROUND);
     }
 }
 
-void draw_legend(CgroupVec cgroups) {
+static void draw_legend(CgroupVec cgroups) {
     int x = HOR_PADDING;
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
@@ -435,8 +431,43 @@ void draw_legend(CgroupVec cgroups) {
     }
 }
 
-void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale, uint64_t min_ts_us,
-                uint64_t max_ts_us, double ts_per_px, double latency_per_px, double preemptions_per_px) {
+static void draw_graph_line(double px, double py, double x, double y, Color color) {
+    double rpx = px;
+    double rpy = py;
+    double rx = x;
+    double ry = y;
+
+    if (rpx < 0) {
+        assert(x != px);
+        double k = px / ((double) (px - x));
+        rpx = 0;
+        rpy = py + (y - py) * k;
+    }
+    if (rx > INNER_WIDTH) {
+        assert(x != px);
+        double k = (x - INNER_WIDTH) / ((double) (x - px));
+        rx = INNER_WIDTH;
+        ry = py + (y - py) * (1.0f - k);
+    }
+    if (rpy > INNER_HEIGHT) {
+        assert(y != py);
+        double k = (py - INNER_HEIGHT) / ((double) (py - y));
+        rpx = px + (x - px) * k;
+        rpy = INNER_HEIGHT;
+    }
+    if (ry > INNER_HEIGHT) {
+        assert(y != py);
+        double k = (y - INNER_HEIGHT) / ((double) (y - py));
+        rx = px + (x - px) * (1.0f - k);
+        ry = INNER_HEIGHT;
+    }
+
+    DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry, color);
+}
+
+static void draw_graph(CgroupVec cgroups, double offset, double x_scale, double latency_y_scale,
+                       double preempts_y_scale, uint64_t min_ts_us, uint64_t max_ts_us, double ts_per_px,
+                       double latency_per_px, double preempts_per_px) {
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
@@ -454,53 +485,22 @@ void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale
             uint32_t latency = point.total_latency_us / point.count;
 
             double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-            double y = latency / latency_per_px * y_scale;
+            double y = latency / latency_per_px * latency_y_scale;
 
             npx = x;
             npy = y;
 
+            if (px == -1) continue;
             if (x < 0) continue;
             if (x > INNER_WIDTH && px > INNER_WIDTH) break;
             if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
-            if (px == -1) continue;
+
+            draw_graph_line(px, py, x, y, cgroup->color);
 
             cgroup->min_latency_us = MIN(cgroup->min_latency_us, latency);
             cgroup->max_latency_us = MAX(cgroup->max_latency_us, latency);
             cgroup->total_latency_us += latency;
             cgroup->count++;
-
-            double rpx = px;
-            double rpy = py;
-            double rx = x;
-            double ry = y;
-
-            if (rpx < 0) {
-                assert(x != px);
-                double k = px / ((double) (px - x));
-                rpx = 0;
-                rpy = py + (y - py) * k;
-            }
-            if (rx > INNER_WIDTH) {
-                assert(x != px);
-                double k = (x - INNER_WIDTH) / ((double) (x - px));
-                rx = INNER_WIDTH;
-                ry = py + (y - py) * (1.0f - k);
-            }
-            if (rpy > INNER_HEIGHT) {
-                assert(y != py);
-                double k = (py - INNER_HEIGHT) / ((double) (py - y));
-                rpx = px + (x - px) * k;
-                rpy = INNER_HEIGHT;
-            }
-            if (ry > INNER_HEIGHT) {
-                assert(y != py);
-                double k = (y - INNER_HEIGHT) / ((double) (y - py));
-                rx = px + (x - px) * (1.0f - k);
-                ry = INNER_HEIGHT;
-            }
-
-            DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
-                     cgroup->color);
         }
 
         px = -1;
@@ -509,54 +509,23 @@ void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale
             Preempt point = cgroup->preempts.data[j];
 
             double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
-            double y = point.count / preemptions_per_px * y_scale;
+            double y = point.count / preempts_per_px * preempts_y_scale;
 
             npx = x;
             npy = y;
 
+            if (px == -1) continue;
             if (x < 0) continue;
             if (x > INNER_WIDTH && px > INNER_WIDTH) break;
             if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
-            if (px == -1) continue;
-
-            double rpx = px;
-            double rpy = py;
-            double rx = x;
-            double ry = y;
-
-            if (rpx < 0) {
-                assert(x != px);
-                double k = px / ((double) (px - x));
-                rpx = 0;
-                rpy = py + (y - py) * k;
-            }
-            if (rx > INNER_WIDTH) {
-                assert(x != px);
-                double k = (x - INNER_WIDTH) / ((double) (x - px));
-                rx = INNER_WIDTH;
-                ry = py + (y - py) * (1.0f - k);
-            }
-            if (rpy > INNER_HEIGHT) {
-                assert(y != py);
-                double k = (py - INNER_HEIGHT) / ((double) (py - y));
-                rpx = px + (x - px) * k;
-                rpy = INNER_HEIGHT;
-            }
-            if (ry > INNER_HEIGHT) {
-                assert(y != py);
-                double k = (y - INNER_HEIGHT) / ((double) (y - py));
-                rx = px + (x - px) * (1.0f - k);
-                ry = INNER_HEIGHT;
-            }
 
             Vector3 hsv = ColorToHSV(cgroup->color);
-            DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
-                     ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
+            draw_graph_line(px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
         }
     }
 }
 
-void draw_stats(int start_y, CgroupVec cgroups) {
+static void draw_stats(int start_y, CgroupVec cgroups) {
     Vector2 group_column_dim = MeasureText2("Group", STATS_FONT_SIZE);
     int group_column_width = group_column_dim.x;
     int min_column_width = MeasureText("Min", STATS_FONT_SIZE);
@@ -627,7 +596,8 @@ int main(void) {
 
     double offset = 0.0f;
     double x_scale = 1.0f;
-    double y_scale = 1.0f;
+    double latency_y_scale = 1.0f;
+    double preempts_y_scale = 1.0f;
 
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
@@ -637,11 +607,11 @@ int main(void) {
     uint64_t min_ts_us = UINT64_MAX;
     uint64_t max_ts_us = 0;
     uint32_t max_latency_us = 0;
-    uint32_t max_preemptions = 0;
+    uint32_t max_preempts = 0;
     double time_per_px = 0;
     double ts_per_px = 0;
     double latency_per_px = 0;
-    double preemptions_per_px = 0;
+    double preempts_per_px = 0;
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
@@ -674,11 +644,12 @@ int main(void) {
             time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
 
             // Updates max values
-            group_entries(&max_latency_us, &max_preemptions, &cgroups, entries);
+            group_entries(&max_latency_us, &max_preempts, &cgroups, entries);
 
             // Min latency and preemptions are assumed to be 0
             latency_per_px = max_latency_us / ((double) INNER_HEIGHT);
-            preemptions_per_px = max_preemptions / ((double) INNER_HEIGHT);
+            preempts_per_px = max_preempts / ((double) INNER_HEIGHT);
+            printf("%u\n", max_preempts);
         }
 
         // Controls
@@ -692,8 +663,14 @@ int main(void) {
             offset = MIN(offset, 1.0f - 1.0f / x_scale);
         }
 
-        if (IsKeyDown(KEY_UP)) y_scale *= Y_SCALE_SPEED;
-        if (IsKeyDown(KEY_DOWN)) y_scale = MAX(y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
+        if (IsKeyDown(KEY_UP)) {
+            if (IsKeyDown(KEY_LEFT_SHIFT)) preempts_y_scale *= Y_SCALE_SPEED;
+            else latency_y_scale *= Y_SCALE_SPEED;
+        }
+        if (IsKeyDown(KEY_DOWN)) {
+            if (IsKeyDown(KEY_LEFT_SHIFT)) preempts_y_scale = MAX(preempts_y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
+            else latency_y_scale = MAX(latency_y_scale / Y_SCALE_SPEED, MIN_Y_SCALE);
+        }
 
         if (IsKeyPressed(KEY_SPACE)) kill(child, SIGTERM);
 
@@ -705,10 +682,10 @@ int main(void) {
 
         int x_axis_max_y
             = draw_x_axis(offset, x_scale, min_time_s, max_time_s, min_ts_us, max_ts_us, time_per_px, ts_per_px);
-        draw_y_axis(y_scale, latency_per_px);
+        draw_y_axis(latency_y_scale, latency_per_px, preempts_y_scale, preempts_per_px);
         draw_legend(cgroups);
-        draw_graph(cgroups, offset, x_scale, y_scale, min_ts_us, max_ts_us, ts_per_px, latency_per_px,
-                   preemptions_per_px);  // collects stats
+        draw_graph(cgroups, offset, x_scale, latency_y_scale, preempts_y_scale, min_ts_us, max_ts_us, ts_per_px,
+                   latency_per_px, preempts_per_px);  // collects stats
         draw_stats(x_axis_max_y, cgroups);
 
         EndDrawing();
