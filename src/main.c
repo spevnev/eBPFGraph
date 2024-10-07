@@ -93,15 +93,15 @@ static char buffer[BUFFER_SIZE];
         (vec)->data[(vec)->length++] = (element);                                       \
     } while (0)
 
-#define VECTOR_FREE(vec)                              \
-    do {                                              \
-        assert((vec) != NULL && (vec)->data != NULL); \
-        free((vec)->data);                            \
+#define VECTOR_FREE(vec)                                             \
+    do {                                                             \
+        if ((vec) != NULL && (vec)->data != NULL) free((vec)->data); \
     } while (0)
 
 typedef struct {
     uint32_t time_s;
     uint64_t ts_ns;
+    int32_t prev_cgroup;
     int32_t cgroup;
     uint32_t latency_ns;
 } Entry;
@@ -112,16 +112,24 @@ typedef struct {
     uint64_t ts_us;
     uint64_t total_latency_us;
     int count;
-} Point;
+} Latency;
 
-VECTOR_TYPEDEF(PointVec, Point);
+VECTOR_TYPEDEF(LatencyVec, Latency);
+
+typedef struct {
+    uint64_t ts_us;
+    uint32_t count;
+} Preempt;
+
+VECTOR_TYPEDEF(PreemptVec, Preempt);
 
 typedef struct {
     bool is_enabled;
     bool is_visible;
     int32_t cgroup;
     Color color;
-    PointVec points;
+    LatencyVec latencies;
+    PreemptVec preempts;
     // Stats collected for each group over the visible area:
     uint32_t min_latency_us;
     uint32_t max_latency_us;
@@ -163,15 +171,6 @@ static void start_ebpf(int *ret_read_fd, pid_t *child) {
     }
 
     *ret_read_fd = read_fd;
-}
-
-static const char *skip_field(const char *ch) {
-    assert(ch != NULL);
-
-    while (*ch == ' ') ch++;
-    while (*ch != ' ' && *ch != '\0') ch++;
-
-    return ch;
 }
 
 static const char *time_field(uint32_t *ret_s, const char *ch) {
@@ -246,7 +245,10 @@ static int read_entries(EntryVec *entries, int fd) {
             ch = time_field(&entry.time_s, ch);
 
             // PREV_CGROUP
-            ch = skip_field(ch);
+            long long prev_cgroup;
+            ch = llong_field(&prev_cgroup, ch);
+            assert(0 <= prev_cgroup && prev_cgroup <= INT32_MAX);
+            entry.prev_cgroup = prev_cgroup;
 
             // CGROUP
             long long cgroup;
@@ -277,61 +279,80 @@ static int read_entries(EntryVec *entries, int fd) {
     return 0;
 }
 
-static uint32_t group_entries(CgroupVec *cgroups, EntryVec entries) {
-    assert(cgroups != NULL);
+static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, int32_t id) {
+    for (size_t j = 0; j < cgroups->length; j++) {
+        if (cgroups->data[j].cgroup == id) {
+            return &cgroups->data[j];
+        }
+    }
+
+    Cgroup new_cgroup = {
+        .is_enabled = true,
+        .is_visible = true,
+        .cgroup = id,
+        .color = COLORS[cgroups->length % COLORS_LEN],
+        .latencies = {0},
+        .preempts = {0},
+    };
+
+    VECTOR_PUSH(cgroups, new_cgroup);
+    return &cgroups->data[cgroups->length - 1];
+}
+
+static void group_entries(uint32_t *max_latency_us, uint32_t *max_preemptions, CgroupVec *cgroups, EntryVec entries) {
+    assert(max_latency_us != NULL && max_preemptions != NULL && cgroups != NULL);
 
     static size_t i = 0;
-
-    uint32_t current_max_latency = 0;
     while (i < entries.length) {
-        Cgroup *cgroup = NULL;
-        for (size_t j = 0; j < cgroups->length; j++) {
-            if (entries.data[i].cgroup == cgroups->data[j].cgroup) {
-                cgroup = &cgroups->data[j];
-                break;
-            }
-        }
-
-        if (cgroup == NULL) {
-            Cgroup new_cgroup = {
-                .is_enabled = true,
-                .cgroup = entries.data[i].cgroup,
-                .color = COLORS[cgroups->length % COLORS_LEN],
-                .points = {0},
-            };
-            VECTOR_PUSH(cgroups, new_cgroup);
-            cgroup = &cgroups->data[cgroups->length - 1];
-        }
-
+        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup);
+        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup);
         uint64_t ts_us = entries.data[i].ts_ns / 1000;
         uint32_t latency_us = entries.data[i].latency_ns / 1000;
 
-        Point *last = cgroup->points.length > 0 ? &cgroup->points.data[cgroup->points.length - 1] : NULL;
-        if (last != NULL && ts_us - last->ts_us < CGROUP_BATCHING_TIME_US) {
-            last->total_latency_us += latency_us;
-            last->count++;
+        // TODO: generalize somehow
+
+        Preempt *last_preempt
+            = prev_cgroup->preempts.length > 0 ? &prev_cgroup->preempts.data[prev_cgroup->preempts.length - 1] : NULL;
+        if (last_preempt != NULL && ts_us - last_preempt->ts_us < CGROUP_BATCHING_TIME_US) {
+            last_preempt->count++;
         } else {
-            if (last != NULL) {
+            if (last_preempt != NULL) {
                 // This doesn't take the very last point into account
-                current_max_latency = MAX(current_max_latency, last->total_latency_us / last->count);
+                *max_preemptions = MAX(*max_preemptions, last_preempt->count);
             }
 
-            Point point = {
+            Preempt preempt = {
+                .ts_us = ts_us,
+                .count = 1,
+            };
+            VECTOR_PUSH(&prev_cgroup->preempts, preempt);
+        }
+
+        Latency *last_latency
+            = cgroup->latencies.length > 0 ? &cgroup->latencies.data[cgroup->latencies.length - 1] : NULL;
+        if (last_latency != NULL && ts_us - last_latency->ts_us < CGROUP_BATCHING_TIME_US) {
+            last_latency->total_latency_us += latency_us;
+            last_latency->count++;
+        } else {
+            if (last_latency != NULL) {
+                // This doesn't take the very last_latency point into account
+                *max_latency_us = MAX(*max_latency_us, last_latency->total_latency_us / last_latency->count);
+            }
+
+            Latency latency = {
                 .ts_us = ts_us,
                 .total_latency_us = latency_us,
                 .count = 1,
             };
-            VECTOR_PUSH(&cgroup->points, point);
+            VECTOR_PUSH(&cgroup->latencies, latency);
         }
 
         i++;
     }
 
     for (size_t i = 0; i < cgroups->length; i++) {
-        cgroups->data[i].is_visible = cgroups->data[i].points.length >= CGROUP_MIN_POINTS;
+        cgroups->data[i].is_visible = cgroups->data[i].latencies.length >= CGROUP_MIN_POINTS;
     }
-
-    return current_max_latency;
 }
 
 int draw_x_axis(double offset, double x_scale, uint32_t min_time_s, uint32_t max_time_s, uint64_t min_ts_us,
@@ -415,7 +436,7 @@ void draw_legend(CgroupVec cgroups) {
 }
 
 void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale, uint64_t min_ts_us,
-                uint64_t max_ts_us, double ts_per_px, double latency_per_px) {
+                uint64_t max_ts_us, double ts_per_px, double latency_per_px, double preemptions_per_px) {
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
@@ -428,8 +449,8 @@ void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale
         double px = -1;
         double py = -1;
         double npx, npy;
-        for (size_t j = 0; j < cgroup->points.length; j++, px = npx, py = npy) {
-            Point point = cgroup->points.data[j];
+        for (size_t j = 0; j < cgroup->latencies.length; j++, px = npx, py = npy) {
+            Latency point = cgroup->latencies.data[j];
             uint32_t latency = point.total_latency_us / point.count;
 
             double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
@@ -480,6 +501,57 @@ void draw_graph(CgroupVec cgroups, double offset, double x_scale, double y_scale
 
             DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
                      cgroup->color);
+        }
+
+        px = -1;
+        py = -1;
+        for (size_t j = 0; j < cgroup->preempts.length; j++, px = npx, py = npy) {
+            Preempt point = cgroup->preempts.data[j];
+
+            double x = (point.ts_us - min_ts_us - (max_ts_us - min_ts_us) * offset) / ts_per_px * x_scale;
+            double y = point.count / preemptions_per_px * y_scale;
+
+            npx = x;
+            npy = y;
+
+            if (x < 0) continue;
+            if (x > INNER_WIDTH && px > INNER_WIDTH) break;
+            if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
+            if (px == -1) continue;
+
+            double rpx = px;
+            double rpy = py;
+            double rx = x;
+            double ry = y;
+
+            if (rpx < 0) {
+                assert(x != px);
+                double k = px / ((double) (px - x));
+                rpx = 0;
+                rpy = py + (y - py) * k;
+            }
+            if (rx > INNER_WIDTH) {
+                assert(x != px);
+                double k = (x - INNER_WIDTH) / ((double) (x - px));
+                rx = INNER_WIDTH;
+                ry = py + (y - py) * (1.0f - k);
+            }
+            if (rpy > INNER_HEIGHT) {
+                assert(y != py);
+                double k = (py - INNER_HEIGHT) / ((double) (py - y));
+                rpx = px + (x - px) * k;
+                rpy = INNER_HEIGHT;
+            }
+            if (ry > INNER_HEIGHT) {
+                assert(y != py);
+                double k = (y - INNER_HEIGHT) / ((double) (y - py));
+                rx = px + (x - px) * (1.0f - k);
+                ry = INNER_HEIGHT;
+            }
+
+            Vector3 hsv = ColorToHSV(cgroup->color);
+            DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry,
+                     ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
         }
     }
 }
@@ -565,9 +637,11 @@ int main(void) {
     uint64_t min_ts_us = UINT64_MAX;
     uint64_t max_ts_us = 0;
     uint32_t max_latency_us = 0;
+    uint32_t max_preemptions = 0;
     double time_per_px = 0;
     double ts_per_px = 0;
     double latency_per_px = 0;
+    double preemptions_per_px = 0;
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
@@ -599,11 +673,12 @@ int main(void) {
             max_time_s = entries.data[entries.length - 1].time_s;
             time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
 
-            uint32_t current_max_latency_us = group_entries(&cgroups, entries);
+            // Updates max values
+            group_entries(&max_latency_us, &max_preemptions, &cgroups, entries);
 
-            // Min latency assumed to be 0
-            max_latency_us = MAX(max_latency_us, current_max_latency_us);
+            // Min latency and preemptions are assumed to be 0
             latency_per_px = max_latency_us / ((double) INNER_HEIGHT);
+            preemptions_per_px = max_preemptions / ((double) INNER_HEIGHT);
         }
 
         // Controls
@@ -632,8 +707,8 @@ int main(void) {
             = draw_x_axis(offset, x_scale, min_time_s, max_time_s, min_ts_us, max_ts_us, time_per_px, ts_per_px);
         draw_y_axis(y_scale, latency_per_px);
         draw_legend(cgroups);
-        draw_graph(cgroups, offset, x_scale, y_scale, min_ts_us, max_ts_us, ts_per_px,
-                   latency_per_px);  // collects stats
+        draw_graph(cgroups, offset, x_scale, y_scale, min_ts_us, max_ts_us, ts_per_px, latency_per_px,
+                   preemptions_per_px);  // collects stats
         draw_stats(x_axis_max_y, cgroups);
 
         EndDrawing();
@@ -641,7 +716,10 @@ int main(void) {
 
     CloseWindow();
 
-    for (size_t i = 0; i < cgroups.length; i++) VECTOR_FREE(&cgroups.data[i].points);
+    for (size_t i = 0; i < cgroups.length; i++) {
+        VECTOR_FREE(&cgroups.data[i].latencies);
+        VECTOR_FREE(&cgroups.data[i].preempts);
+    }
     VECTOR_FREE(&cgroups);
     VECTOR_FREE(&entries);
 
