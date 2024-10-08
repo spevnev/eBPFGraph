@@ -1,5 +1,6 @@
 #define _DEFAULT_SOURCE
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/prctl.h>
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -66,9 +68,11 @@ static const float X_SCALE_SPEED = 1.07f;
 static const float Y_SCALE_SPEED = 1.07f;
 static const float MIN_Y_SCALE = 0.5f;
 
-// Temp buffer for snprintf-ing
+// Buffers
+static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
+#define PATH_BUFFER_SIZE 4096
 #define BUFFER_SIZE 256
-static char buffer[BUFFER_SIZE];
+static char buffer[BUFFER_SIZE];  // global temp buffer for snprintf-ing
 
 #define ERROR(...)                    \
     do {                              \
@@ -110,6 +114,13 @@ static char buffer[BUFFER_SIZE];
     } while (0)
 
 typedef struct {
+    uint64_t id;
+    char *name;
+} CgroupName;
+
+VECTOR_TYPEDEF(CgroupNameVec, CgroupName);
+
+typedef struct {
     uint32_t time_s;
     uint64_t ts_ns;
     uint64_t prev_cgroup_id;
@@ -141,7 +152,7 @@ typedef struct {
     Color color;
     LatencyVec latencies;
     PreemptVec preempts;
-    // Stats collected for each group over the visible area:
+    // Stats collected for each cgroup over the visible area:
     uint32_t min_latency_us;
     uint32_t max_latency_us;
     uint64_t total_latency_us;
@@ -159,6 +170,37 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
+
+static void collect_cgroup_names(CgroupNameVec *cgroup_names, char *path) {
+    struct stat stats;
+    if (stat(path, &stats) == -1) ERROR("unable to stat \"%s\".", path);
+
+    CgroupName cgroup = {
+        .id = stats.st_ino,
+        .name = strdup(path + CGROUP_PATH_PREFIX_LENGTH),
+    };
+    VECTOR_PUSH(cgroup_names, cgroup);
+
+    DIR *dir = opendir(path);
+    if (!dir) ERROR("unable to open \"%s\".", path);
+
+    size_t path_len = strlen(path);
+
+    struct dirent *dirent;
+    while ((dirent = readdir(dir)) != NULL) {
+        if (strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0) continue;
+        if (dirent->d_type != DT_DIR) continue;
+
+        size_t dir_len = strlen(dirent->d_name);
+        assert(path_len + dir_len + 1 < PATH_BUFFER_SIZE);
+        memcpy(path + path_len, dirent->d_name, dir_len);
+        path[path_len + dir_len] = '/';
+        path[path_len + dir_len + 1] = '\0';
+
+        collect_cgroup_names(cgroup_names, path);
+    }
+    closedir(dir);
+}
 
 static void start_ebpf(int *ret_read_fd, pid_t *child) {
     int fds[2];
@@ -389,6 +431,18 @@ static void draw_y_axis(double latency_y_scale, double latency_per_px, double pr
     }
 }
 
+static const char *get_cgroup_name(CgroupNameVec cgroup_names, uint64_t id) {
+    const char *name = NULL;
+    for (size_t j = 0; j < cgroup_names.length; j++) {
+        if (cgroup_names.data[j].id == id) {
+            name = cgroup_names.data[j].name;
+            break;
+        }
+    }
+    assert(name != NULL);  // TODO: this is possible if cgroup was created after indexing them -> reindex
+    return name;
+}
+
 static void draw_legend(CgroupVec cgroups) {
     int x = HOR_PADDING;
     for (size_t i = 0; i < cgroups.length; i++) {
@@ -423,7 +477,7 @@ static void draw_legend(CgroupVec cgroups) {
             }
         }
 
-        snprintf(buffer, BUFFER_SIZE, "%d", cgroups.data[i].cgroup);
+        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup->id);
         Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
         DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroup->color);
         x += td.x + LEGEND_PADDING;
@@ -534,9 +588,10 @@ static void draw_graph(CgroupVec cgroups, double offset, double x_scale, double 
     }
 }
 
-static void draw_stats(int start_y, CgroupVec cgroups) {
-    Vector2 group_column_dim = MeasureText2("Group", STATS_LABEL_FONT_SIZE);
-    int group_column_width = group_column_dim.x;
+static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_names) {
+    Vector2 id_column_dim = MeasureText2("Id", STATS_LABEL_FONT_SIZE);
+    int id_column_width = id_column_dim.x;
+    int name_column_width = MeasureText("Name", STATS_LABEL_FONT_SIZE);
     int min_latency_column_width = MeasureText("Min latency", STATS_LABEL_FONT_SIZE);
     int max_latency_column_width = MeasureText("Max latency", STATS_LABEL_FONT_SIZE);
     int avg_latency_column_width = MeasureText("Avg latency", STATS_LABEL_FONT_SIZE);
@@ -548,7 +603,10 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
         snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
-        group_id_column_width = MAX(group_id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
+        id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
+
+        snprintf(buffer, BUFFER_SIZE, "%s", get_cgroup_name(cgroup_names, cgroup.id));
+        name_column_width = MAX(name_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_latency_us);
         min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
@@ -569,8 +627,9 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
         avg_preempts_column_width = MAX(avg_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
     }
 
-    int group_column_x = HOR_PADDING;
-    int min_latency_column_x = group_column_x + group_column_width + STATS_COLUMN_PADDING;
+    int id_column_x = HOR_PADDING;
+    int name_column_x = id_column_x + id_column_width + STATS_COLUMN_PADDING;
+    int min_latency_column_x = name_column_x + name_column_width + STATS_COLUMN_PADDING;
     int max_latency_column_x = min_latency_column_x + min_latency_column_width + STATS_COLUMN_PADDING;
     int avg_latency_column_x = max_latency_column_x + max_latency_column_width + STATS_COLUMN_PADDING;
     int min_preempts_column_x = avg_latency_column_x + avg_latency_column_width + STATS_COLUMN_PADDING;
@@ -578,14 +637,15 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
     int avg_preempts_column_x = max_preempts_column_x + max_preempts_column_width + STATS_COLUMN_PADDING;
 
     int y = start_y;
-    DrawText("Group", group_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
+    DrawText("Id", id_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
+    DrawText("Name", name_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Min latency", min_latency_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Max latency", max_latency_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Avg latency", avg_latency_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Min preempts", min_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Max preempts", max_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     DrawText("Avg preempts", avg_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
-    y += group_column_dim.y + TEXT_MARGIN;
+    y += id_column_dim.y + TEXT_MARGIN;
 
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
@@ -593,7 +653,10 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
 
         snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
         Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
-        DrawText(buffer, group_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
+        DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
+
+        snprintf(buffer, BUFFER_SIZE, "%s", get_cgroup_name(cgroup_names, cgroup.id));
+        DrawText(buffer, name_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_latency_us);
         DrawText(buffer, min_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
@@ -622,6 +685,10 @@ int main(void) {
     if (RAYLIB_VERSION_MAJOR != 5) ERROR("the required raylib version is 5.");
 
     if (geteuid() != 0) ERROR("must be ran as root.");
+
+    CgroupNameVec cgroup_names = {0};
+    char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
+    collect_cgroup_names(&cgroup_names, path);
 
     bool is_child_running = true;
     int input_fd;
@@ -719,7 +786,7 @@ int main(void) {
         draw_legend(cgroups);
         draw_graph(cgroups, offset, x_scale, latency_y_scale, preempts_y_scale, min_ts_us, max_ts_us, ts_per_px,
                    latency_per_px, preempts_per_px);  // collects stats
-        draw_stats(x_axis_max_y, cgroups);
+        draw_stats(x_axis_max_y, cgroups, cgroup_names);
 
         EndDrawing();
     }
@@ -732,6 +799,8 @@ int main(void) {
     }
     VECTOR_FREE(&cgroups);
     VECTOR_FREE(&entries);
+    for (size_t i = 0; i < cgroup_names.length; i++) free(cgroup_names.data[i].name);
+    VECTOR_FREE(&cgroup_names);
 
     kill(child, SIGTERM);
     close(input_fd);
