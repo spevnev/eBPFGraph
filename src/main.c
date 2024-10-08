@@ -42,9 +42,9 @@ static const int LEGEND_FONT_SIZE = 16;
 static const int LEGEND_PADDING = 20;
 
 // Stats
-static const int STATS_LABEL_FONT_SIZE = 18;
-static const int STATS_DATA_FONT_SIZE = 20;
-static const int STATS_COLUMN_PADDING = 25;
+static const int STATS_LABEL_FONT_SIZE = 20;
+static const int STATS_DATA_FONT_SIZE = 18;
+static const int STATS_COLUMN_PADDING = 20;
 
 // Colors
 static const Color BACKGROUND = {0x18, 0x18, 0x18, 0xff};
@@ -112,9 +112,9 @@ static char buffer[BUFFER_SIZE];
 typedef struct {
     uint32_t time_s;
     uint64_t ts_ns;
-    int32_t prev_cgroup;
-    int32_t cgroup;
-    uint32_t latency_ns;
+    uint64_t prev_cgroup_id;
+    uint64_t cgroup_id;
+    uint64_t latency_ns;
 } Entry;
 
 VECTOR_TYPEDEF(EntryVec, Entry);
@@ -137,7 +137,7 @@ VECTOR_TYPEDEF(PreemptVec, Preempt);
 typedef struct {
     bool is_enabled;
     bool is_visible;
-    int32_t cgroup;
+    uint64_t id;
     Color color;
     LatencyVec latencies;
     PreemptVec preempts;
@@ -210,13 +210,13 @@ static const char *time_field(uint32_t *ret_s, const char *ch) {
     return end;
 }
 
-static const char *llong_field(long long *ret, const char *ch) {
+static const char *u64_field(uint64_t *ret, const char *ch) {
     assert(ret != NULL && ch != NULL);
 
     while (*ch == ' ') ch++;
 
     char *end = NULL;
-    *ret = strtoll(ch, &end, 10);
+    *ret = strtoull(ch, &end, 10);
     assert(ch < end);
 
     return end;
@@ -254,35 +254,13 @@ static int read_entries(EntryVec *entries, int fd) {
             }
 
             Entry entry = {0};
+
             const char *ch = buffer + line_idx;
-
-            // TIME
             ch = time_field(&entry.time_s, ch);
-
-            // PREV_CGROUP
-            long long prev_cgroup;
-            ch = llong_field(&prev_cgroup, ch);
-            assert(0 <= prev_cgroup && prev_cgroup <= INT32_MAX);
-            entry.prev_cgroup = prev_cgroup;
-
-            // CGROUP
-            long long cgroup;
-            ch = llong_field(&cgroup, ch);
-            assert(0 <= cgroup && cgroup <= INT32_MAX);
-            entry.cgroup = cgroup;
-
-            // RUNQ_LATENCY
-            long long latency_ns;
-            ch = llong_field(&latency_ns, ch);
-            assert(0 <= latency_ns && latency_ns <= UINT32_MAX);
-            entry.latency_ns = latency_ns;
-
-            // TS
-            long long ts_ns;
-            ch = llong_field(&ts_ns, ch);
-            assert(0 <= ts_ns);
-            entry.ts_ns = ts_ns;
-
+            ch = u64_field(&entry.prev_cgroup_id, ch);
+            ch = u64_field(&entry.cgroup_id, ch);
+            ch = u64_field(&entry.latency_ns, ch);
+            ch = u64_field(&entry.ts_ns, ch);
             assert(*ch == '\n');
 
             VECTOR_PUSH(entries, entry);
@@ -294,9 +272,9 @@ static int read_entries(EntryVec *entries, int fd) {
     return 0;
 }
 
-static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, int32_t id) {
+static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
     for (size_t j = 0; j < cgroups->length; j++) {
-        if (cgroups->data[j].cgroup == id) {
+        if (cgroups->data[j].id == id) {
             return &cgroups->data[j];
         }
     }
@@ -304,7 +282,7 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, int32_t id) {
     Cgroup new_cgroup = {
         .is_enabled = true,
         .is_visible = true,
-        .cgroup = id,
+        .id = id,
         .color = COLORS[cgroups->length % COLORS_LEN],
         .latencies = {0},
         .preempts = {0},
@@ -322,7 +300,7 @@ static void group_entries(uint32_t *max_latency_us, uint32_t *max_preempts, Cgro
         uint64_t ts_us = entries.data[i].ts_ns / 1000;
         uint32_t latency_us = entries.data[i].latency_ns / 1000;
 
-        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup);
+        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
         Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
         if (last_preempt != NULL && ts_us - last_preempt->ts_us < CGROUP_BATCHING_TIME_US) {
             last_preempt->count++;
@@ -335,7 +313,7 @@ static void group_entries(uint32_t *max_latency_us, uint32_t *max_preempts, Cgro
             VECTOR_PUSH(&prev_cgroup->preempts, preempt);
         }
 
-        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup);
+        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup_id);
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && ts_us - last_latency->ts_us < CGROUP_BATCHING_TIME_US) {
             last_latency->total_latency_us += latency_us;
@@ -447,7 +425,7 @@ static void draw_legend(CgroupVec cgroups) {
 
         snprintf(buffer, BUFFER_SIZE, "%d", cgroups.data[i].cgroup);
         Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
-        DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroups.data[i].color);
+        DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroup->color);
         x += td.x + LEGEND_PADDING;
     }
 }
@@ -569,26 +547,26 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
-        snprintf(buffer, BUFFER_SIZE, "%d", cgroup.cgroup);
-        group_column_width = MAX(group_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
+        group_id_column_width = MAX(group_id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_latency_us);
-        min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.max_latency_us);
-        max_latency_column_width = MAX(max_latency_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        max_latency_column_width = MAX(max_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", (unsigned int) cgroup.total_latency_us / cgroup.latency_count);
-        avg_latency_column_width = MAX(avg_latency_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        avg_latency_column_width = MAX(avg_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.min_preempts);
-        min_preempts_column_width = MAX(min_preempts_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        min_preempts_column_width = MAX(min_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", cgroup.max_preempts);
-        max_preempts_column_width = MAX(max_preempts_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        max_preempts_column_width = MAX(max_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         snprintf(buffer, BUFFER_SIZE, "%uus", (unsigned int) cgroup.total_preempts / cgroup.preempts_count);
-        avg_preempts_column_width = MAX(avg_preempts_column_width, MeasureText(buffer, STATS_LABEL_FONT_SIZE));
+        avg_preempts_column_width = MAX(avg_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
     }
 
     int group_column_x = HOR_PADDING;
@@ -613,7 +591,7 @@ static void draw_stats(int start_y, CgroupVec cgroups) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
-        snprintf(buffer, BUFFER_SIZE, "%d", cgroup.cgroup);
+        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
         Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
         DrawText(buffer, group_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
 
