@@ -37,9 +37,9 @@ SEC("tp_btf/sched_wakeup")
 int tp_sched_wakeup(__u64 *ctx) {
     struct task_struct *task = (void *) ctx[0];
     __u32 pid = task->pid;
-    __u64 ts = bpf_ktime_get_ns();
+    __u64 ktime = bpf_ktime_get_ns();
 
-    bpf_map_update_elem(&runq_enqueued, &pid, &ts, BPF_NOEXIST);
+    bpf_map_update_elem(&runq_enqueued, &pid, &ktime, BPF_NOEXIST);
 
     return 0;
 }
@@ -70,7 +70,7 @@ int tp_sched_switch(__u64 *ctx) {
         event->prev_cgroup_id = prev_cgroup_id;
         event->cgroup_id = cgroup_id;
         event->runq_latency = runq_latency;
-        event->ts = now;
+        event->ktime = now;
         bpf_ringbuf_submit(event, 0);
     }
 
