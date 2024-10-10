@@ -64,8 +64,8 @@ static const Color COLORS[]
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Data processing
-static const size_t CGROUP_MIN_POINTS = 30;
-static const uint64_t CGROUP_BATCHING_TIME_NS = 100000000;  // 100ms
+static const int CGROUP_MIN_ENTRIES = 1000;
+static const uint64_t CGROUP_BATCHING_TIME_NS = 200000000;  // 200ms
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
@@ -120,8 +120,8 @@ static bool bar_graph = true;
 
 #define VECTOR_TYPEDEF(name, type) \
     typedef struct {               \
-        size_t capacity;           \
-        size_t length;             \
+        int capacity;              \
+        int length;                \
         type *data;                \
     } name
 
@@ -182,15 +182,18 @@ VECTOR_TYPEDEF(PreemptVec, Preempt);
 typedef struct {
     bool is_enabled;
     bool is_visible;
+
     uint64_t id;
     Color color;
+    uint32_t entries_count;
+
     LatencyVec latencies;
-    PreemptVec preempts;
-    // Stats collected for each cgroup over the visible area:
     uint64_t min_latency_ns;
     uint64_t max_latency_ns;
     uint64_t total_latency_ns;
     uint32_t latency_count;
+
+    PreemptVec preempts;
     uint32_t min_preempts;
     uint32_t max_preempts;
     uint64_t total_preempts;
@@ -238,7 +241,7 @@ static void collect_cgroup_names(CgroupNameVec *cgroup_names, char *path) {
 
 static const char *get_cgroup_name(CgroupNameVec cgroup_names, uint64_t id) {
     const char *name = NULL;
-    for (size_t j = 0; j < cgroup_names.length; j++) {
+    for (int j = 0; j < cgroup_names.length; j++) {
         if (cgroup_names.data[j].id == id) {
             name = cgroup_names.data[j].name;
             break;
@@ -361,7 +364,7 @@ static int read_entries(EntryVec *entries, int fd) {
 }
 
 static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
-    for (size_t j = 0; j < cgroups->length; j++) {
+    for (int j = 0; j < cgroups->length; j++) {
         if (cgroups->data[j].id == id) {
             return &cgroups->data[j];
         }
@@ -372,6 +375,7 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
         .is_visible = true,
         .id = id,
         .color = COLORS[cgroups->length % COLORS_LEN],
+        .entries_count = 0,
         .latencies = {0},
         .preempts = {0},
     };
@@ -383,7 +387,7 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
 static void group_entries(CgroupVec *cgroups, EntryVec entries) {
     assert(cgroups != NULL);
 
-    static size_t i = 0;
+    static int i = 0;
     while (i < entries.length) {
         Entry entry = entries.data[i];
 
@@ -405,6 +409,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
             };
             VECTOR_PUSH(&cgroup->latencies, latency);
         }
+        cgroup->entries_count++;
 
         Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
         Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
@@ -426,8 +431,8 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         i++;
     }
 
-    for (size_t i = 0; i < cgroups->length; i++) {
-        cgroups->data[i].is_visible = cgroups->data[i].latencies.length >= CGROUP_MIN_POINTS;
+    for (int i = 0; i < cgroups->length; i++) {
+        cgroups->data[i].is_visible = cgroups->data[i].entries_count >= CGROUP_MIN_ENTRIES;
     }
 }
 
@@ -485,7 +490,7 @@ static void draw_y_axis() {
 
 static void draw_legend(CgroupVec cgroups) {
     int x = HOR_PADDING;
-    for (size_t i = 0; i < cgroups.length; i++) {
+    for (int i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible) continue;
 
@@ -509,7 +514,7 @@ static void draw_legend(CgroupVec cgroups) {
 
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 if (IsKeyDown(KEY_LEFT_SHIFT)) {
-                    for (size_t j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
+                    for (int j = 0; j < cgroups.length; j++) cgroups.data[j].is_enabled = false;
                     cgroup->is_enabled = true;
                 } else {
                     cgroup->is_enabled = !cgroup->is_enabled;
@@ -569,7 +574,7 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
 }
 
 static void draw_graph(CgroupVec cgroups) {
-    for (size_t i = 0; i < cgroups.length; i++) {
+    for (int i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
 
@@ -584,7 +589,7 @@ static void draw_graph(CgroupVec cgroups) {
 
             px = -1;
             py = -1;
-            for (size_t j = 0; j < cgroup->latencies.length - 1; j++, px = npx, py = npy) {
+            for (int j = 0; j < cgroup->latencies.length - 1; j++, px = npx, py = npy) {
                 Latency point = cgroup->latencies.data[j];
                 double latency = point.total_latency_ns / ((double) point.count);
 
@@ -622,7 +627,7 @@ static void draw_graph(CgroupVec cgroups) {
 
             px = -1;
             py = -1;
-            for (size_t j = 0; j < cgroup->preempts.length - 1; j++, px = npx, py = npy) {
+            for (int j = 0; j < cgroup->preempts.length - 1; j++, px = npx, py = npy) {
                 Preempt point = cgroup->preempts.data[j];
 
                 double x = (point.ktime_ns - min_ktime_ns - (max_ktime_ns - min_ktime_ns) * x_offset) / ktime_per_px
@@ -659,7 +664,7 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
     int min_preempts_column_width = MeasureText("Min preempts", STATS_LABEL_FONT_SIZE);
     int max_preempts_column_width = MeasureText("Max preempts", STATS_LABEL_FONT_SIZE);
     int avg_preempts_column_width = MeasureText("Avg preempts", STATS_LABEL_FONT_SIZE);
-    for (size_t i = 0; i < cgroups.length; i++) {
+    for (int i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
@@ -723,7 +728,7 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
     DrawText("Avg preempts", avg_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     y += id_column_dim.y + TEXT_MARGIN;
 
-    for (size_t i = 0; i < cgroups.length; i++) {
+    for (int i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
@@ -885,13 +890,13 @@ int main(void) {
 
     CloseWindow();
 
-    for (size_t i = 0; i < cgroups.length; i++) {
+    for (int i = 0; i < cgroups.length; i++) {
         VECTOR_FREE(&cgroups.data[i].latencies);
         VECTOR_FREE(&cgroups.data[i].preempts);
     }
     VECTOR_FREE(&cgroups);
     VECTOR_FREE(&entries);
-    for (size_t i = 0; i < cgroup_names.length; i++) free(cgroup_names.data[i].name);
+    for (int i = 0; i < cgroup_names.length; i++) free(cgroup_names.data[i].name);
     VECTOR_FREE(&cgroup_names);
 
     kill(child, SIGTERM);
