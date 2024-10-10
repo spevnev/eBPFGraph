@@ -19,15 +19,15 @@
 
 // Window
 static const char *TITLE = "eBPF Graph";
-static const int WIDTH = 1600;
-static const int HEIGHT = 1000;
+static const int MIN_WIDTH = 800;
+static const int MIN_HEIGHT = 500;
+static const int DEFAULT_WIDTH = 1600;
+static const int DEFAULT_HEIGHT = 1000;
 
 // Graph
 static const int HOR_PADDING = 60;
 static const int TOP_PADDING = 75;
 static const int BOT_PADDING = 250;
-#define INNER_WIDTH (WIDTH - 2 * HOR_PADDING)
-#define INNER_HEIGHT (HEIGHT - TOP_PADDING - BOT_PADDING)
 static const int GRID_SIZE = 60;
 
 // Unit scaling/conversion
@@ -79,6 +79,26 @@ static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 #define PATH_BUFFER_SIZE 4096
 #define BUFFER_SIZE 256
 static char buffer[BUFFER_SIZE];  // global temp buffer for snprintf-ing
+
+// Global variables
+static int width, height, inner_width, inner_height;
+static double x_offset = 0.0f;
+static double x_scale = 1.0f;
+static double latency_y_scale = 0.95f;
+static double preempts_y_scale = 0.95f;
+static uint32_t min_time_s = UINT32_MAX;
+static uint32_t max_time_s = 0;
+static double time_per_px = 0;
+static uint64_t min_ktime_ns = UINT64_MAX;
+static uint64_t max_ktime_ns = 0;
+static double ktime_per_px = 0;
+static uint64_t max_latency_ns = 0;
+static double latency_per_px = 0;
+static uint32_t max_preempts = 0;
+static double preempts_per_px = 0;
+static bool draw_latency = true;
+static bool draw_preempts = true;
+static bool bar_graph = true;
 
 #define ERROR(...)                    \
     do {                              \
@@ -352,28 +372,12 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
     return &cgroups->data[cgroups->length - 1];
 }
 
-static void group_entries(uint64_t *max_latency_ns, uint32_t *max_preempts, CgroupVec *cgroups, EntryVec entries) {
-    assert(max_latency_ns != NULL && max_preempts != NULL && cgroups != NULL);
+static void group_entries(CgroupVec *cgroups, EntryVec entries) {
+    assert(cgroups != NULL);
 
     static size_t i = 0;
     while (i < entries.length) {
         Entry entry = entries.data[i];
-
-        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
-        Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
-        if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
-            last_preempt->count++;
-        } else {
-            if (last_preempt != NULL) {
-                *max_preempts = MAX(*max_preempts, last_preempt->count);
-            }
-
-            Preempt preempt = {
-                .ktime_ns = entry.ktime_ns,
-                .count = 1,
-            };
-            VECTOR_PUSH(&prev_cgroup->preempts, preempt);
-        }
 
         Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup_id);
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
@@ -382,7 +386,8 @@ static void group_entries(uint64_t *max_latency_ns, uint32_t *max_preempts, Cgro
             last_latency->count++;
         } else {
             if (last_latency != NULL) {
-                *max_latency_ns = MAX(*max_latency_ns, last_latency->total_latency_ns / last_latency->count);
+                max_ktime_ns = MAX(max_ktime_ns, last_latency->ktime_ns);
+                max_latency_ns = MAX(max_latency_ns, last_latency->total_latency_ns / last_latency->count);
             }
 
             Latency latency = {
@@ -393,6 +398,23 @@ static void group_entries(uint64_t *max_latency_ns, uint32_t *max_preempts, Cgro
             VECTOR_PUSH(&cgroup->latencies, latency);
         }
 
+        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
+        Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
+        if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
+            last_preempt->count++;
+        } else {
+            if (last_preempt != NULL) {
+                max_ktime_ns = MAX(max_ktime_ns, last_preempt->ktime_ns);
+                max_preempts = MAX(max_preempts, last_preempt->count);
+            }
+
+            Preempt preempt = {
+                .ktime_ns = entry.ktime_ns,
+                .count = 1,
+            };
+            VECTOR_PUSH(&prev_cgroup->preempts, preempt);
+        }
+
         i++;
     }
 
@@ -401,14 +423,13 @@ static void group_entries(uint64_t *max_latency_ns, uint32_t *max_preempts, Cgro
     }
 }
 
-static int draw_x_axis(double x_offset, double x_scale, uint32_t min_time_s, uint32_t max_time_s, uint64_t min_ktime_ns,
-                       uint64_t max_ktime_ns, double time_per_px, double ktime_per_px) {
+static int draw_x_axis() {
     int max_y = 0;
-    for (int i = 0; i <= INNER_WIDTH / GRID_SIZE; i++) {
+    for (int i = 0; i <= inner_width / GRID_SIZE; i++) {
         int x = i * GRID_SIZE + HOR_PADDING;
-        int y = HEIGHT - BOT_PADDING + TEXT_MARGIN;
+        int y = height - BOT_PADDING + TEXT_MARGIN;
 
-        DrawLine(x, TOP_PADDING, x, HEIGHT - BOT_PADDING, GRID_COLOR);
+        DrawLine(x, TOP_PADDING, x, height - BOT_PADDING, GRID_COLOR);
 
         uint64_t ktime_ns
             = min_ktime_ns + ktime_per_px * i * GRID_SIZE / x_scale + (max_ktime_ns - min_ktime_ns) * x_offset;
@@ -429,19 +450,18 @@ static int draw_x_axis(double x_offset, double x_scale, uint32_t min_time_s, uin
     return max_y;
 }
 
-static void draw_y_axis(double latency_y_scale, double latency_per_px, double preempts_y_scale,
-                        double preempts_per_px) {
+static void draw_y_axis() {
     snprintf(buffer, BUFFER_SIZE, "Latency (%s)", LATENCY_DISPLAY_UNITS);
     Vector2 td = MeasureText2(buffer, AXIS_LABEL_FONT_SIZE);
     DrawText(buffer, HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE, FOREGROUND);
 
     td = MeasureText2("Preemptions", AXIS_LABEL_FONT_SIZE);
-    DrawText("Preemptions", WIDTH - HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE,
+    DrawText("Preemptions", width - HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE,
              FOREGROUND);
 
-    for (int i = 0; i <= INNER_HEIGHT / GRID_SIZE; i++) {
-        int y = HEIGHT - BOT_PADDING - GRID_SIZE * i;
-        DrawLine(HOR_PADDING, y, WIDTH - HOR_PADDING, y, GRID_COLOR);
+    for (int i = 0; i <= inner_height / GRID_SIZE; i++) {
+        int y = height - BOT_PADDING - GRID_SIZE * i;
+        DrawLine(HOR_PADDING, y, width - HOR_PADDING, y, GRID_COLOR);
 
         uint64_t latency_ns = latency_per_px * i * GRID_SIZE / latency_y_scale;
         snprintf(buffer, BUFFER_SIZE, "%lu", latency_ns / LATENCY_DISPLAY_SCALING);
@@ -451,7 +471,7 @@ static void draw_y_axis(double latency_y_scale, double latency_per_px, double pr
         uint32_t preempts = preempts_per_px * i * GRID_SIZE / preempts_y_scale;
         snprintf(buffer, BUFFER_SIZE, "%u", preempts);
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
-        DrawText(buffer, WIDTH - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
+        DrawText(buffer, width - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
     }
 }
 
@@ -496,16 +516,15 @@ static void draw_legend(CgroupVec cgroups) {
     }
 }
 
-// TODO: if batch_time is high, you can see the point moving (ugly!)
-static void draw_graph_line(bool bar_graph, double px, double py, double x, double y, Color color) {
+static void draw_graph_line(double px, double py, double x, double y, Color color) {
     if (bar_graph) {
         double rpx = HOR_PADDING + MAX(px, 0);
-        double rx = MIN(HOR_PADDING + x, WIDTH - HOR_PADDING);
-        double rpy = HEIGHT - BOT_PADDING - MIN(py, INNER_HEIGHT);
-        double ry = HEIGHT - BOT_PADDING - MIN(y, INNER_HEIGHT);
+        double rx = MIN(HOR_PADDING + x, width - HOR_PADDING);
+        double rpy = height - BOT_PADDING - MIN(py, inner_height);
+        double ry = height - BOT_PADDING - MIN(y, inner_height);
 
-        if (py <= INNER_HEIGHT) DrawLine(rpx, rpy, rx, rpy, color);
-        if (x <= INNER_WIDTH) DrawLine(rx, rpy, rx, ry, color);
+        if (py <= inner_height) DrawLine(rpx, rpy, rx, rpy, color);
+        if (x <= inner_width) DrawLine(rx, rpy, rx, ry, color);
     } else {
         double rpx = px;
         double rpy = py;
@@ -518,38 +537,37 @@ static void draw_graph_line(bool bar_graph, double px, double py, double x, doub
             rpx = 0;
             rpy = py + (y - py) * k;
         }
-        if (rx > INNER_WIDTH) {
+        if (rx > inner_width) {
             assert(x != px);
-            double k = (x - INNER_WIDTH) / ((double) (x - px));
-            rx = INNER_WIDTH;
+            double k = (x - inner_width) / ((double) (x - px));
+            rx = inner_width;
             ry = py + (y - py) * (1.0f - k);
         }
-        if (rpy > INNER_HEIGHT) {
+        if (rpy > inner_height) {
             assert(y != py);
-            double k = (py - INNER_HEIGHT) / ((double) (py - y));
+            double k = (py - inner_height) / ((double) (py - y));
             rpx = px + (x - px) * k;
-            rpy = INNER_HEIGHT;
+            rpy = inner_height;
         }
-        if (ry > INNER_HEIGHT) {
+        if (ry > inner_height) {
             assert(y != py);
-            double k = (y - INNER_HEIGHT) / ((double) (y - py));
+            double k = (y - inner_height) / ((double) (y - py));
             rx = px + (x - px) * (1.0f - k);
-            ry = INNER_HEIGHT;
+            ry = inner_height;
         }
 
-        DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry, color);
+        DrawLine(HOR_PADDING + rpx, height - BOT_PADDING - rpy, HOR_PADDING + rx, height - BOT_PADDING - ry, color);
     }
 }
 
-static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, CgroupVec cgroups, double x_offset,
-                       double x_scale, double latency_y_scale, double preempts_y_scale, uint64_t min_ktime_ns,
-                       uint64_t max_ktime_ns, double ktime_per_px, double latency_per_px, double preempts_per_px) {
+static void draw_graph(CgroupVec cgroups) {
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
 
         double npx, npy, px, py;
 
+        // TODO: simplify/refactor:
         if (draw_latency) {
             // Reset stats
             cgroup->min_latency_ns = UINT64_MAX;
@@ -559,7 +577,7 @@ static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, Cg
 
             px = -1;
             py = -1;
-            for (size_t j = 0; j < cgroup->latencies.length; j++, px = npx, py = npy) {
+            for (size_t j = 0; j < cgroup->latencies.length - 1; j++, px = npx, py = npy) {
                 Latency point = cgroup->latencies.data[j];
                 double latency = point.total_latency_ns / ((double) point.count);
 
@@ -572,10 +590,10 @@ static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, Cg
 
                 if (px == -1) continue;
                 if (x < 0) continue;
-                if (x > INNER_WIDTH && px > INNER_WIDTH) break;
-                if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
+                if (x > inner_width && px > inner_width) break;
+                if (y > inner_height && py > inner_height) continue;
 
-                draw_graph_line(bar_graph, px, py, x, y, cgroup->color);
+                draw_graph_line(px, py, x, y, cgroup->color);
 
                 cgroup->min_latency_ns = MIN(cgroup->min_latency_ns, latency);
                 cgroup->max_latency_ns = MAX(cgroup->max_latency_ns, latency);
@@ -593,7 +611,7 @@ static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, Cg
 
             px = -1;
             py = -1;
-            for (size_t j = 0; j < cgroup->preempts.length; j++, px = npx, py = npy) {
+            for (size_t j = 0; j < cgroup->preempts.length - 1; j++, px = npx, py = npy) {
                 Preempt point = cgroup->preempts.data[j];
 
                 double x = (point.ktime_ns - min_ktime_ns - (max_ktime_ns - min_ktime_ns) * x_offset) / ktime_per_px
@@ -605,11 +623,11 @@ static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, Cg
 
                 if (px == -1) continue;
                 if (x < 0) continue;
-                if (x > INNER_WIDTH && px > INNER_WIDTH) break;
-                if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
+                if (x > inner_width && px > inner_width) break;
+                if (y > inner_height && py > inner_width) continue;
 
                 Vector3 hsv = ColorToHSV(cgroup->color);
-                draw_graph_line(bar_graph, px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
+                draw_graph_line(px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
 
                 cgroup->min_preempts = MIN(cgroup->min_preempts, point.count);
                 cgroup->max_preempts = MAX(cgroup->max_preempts, point.count);
@@ -743,7 +761,7 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
         }
 
         y += td.y + TEXT_MARGIN;
-        if (y >= HEIGHT) break;
+        if (y >= height) break;
     }
 }
 
@@ -752,44 +770,35 @@ int main(void) {
 
     if (geteuid() != 0) ERROR("must be ran as root.");
 
-    CgroupNameVec cgroup_names = {0};
-    char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
-    collect_cgroup_names(&cgroup_names, path);
-
     bool is_child_running = true;
     int input_fd;
     pid_t child;
     start_ebpf(&input_fd, &child);
 
-    double x_offset = 0.0f;
-    double x_scale = 1.0f;
-    double latency_y_scale = 0.95f;
-    double preempts_y_scale = 0.95f;
+    CgroupNameVec cgroup_names = {0};
+    char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
+    collect_cgroup_names(&cgroup_names, path);
 
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
 
-    uint32_t min_time_s = UINT32_MAX;
-    uint32_t max_time_s = 0;
-    double time_per_px = 0;
-    uint64_t min_ktime_ns = UINT64_MAX;
-    uint64_t max_ktime_ns = 0;
-    double ktime_per_px = 0;
-    uint64_t max_latency_ns = 0;
-    double latency_per_px = 0;
-    uint32_t max_preempts = 0;
-    double preempts_per_px = 0;
-
-    bool draw_latency = true;
-    bool draw_preempts = true;
-    bool bar_graph = true;
-
     SetTraceLogLevel(LOG_WARNING);
-    InitWindow(WIDTH, HEIGHT, TITLE);
+    SetWindowMinSize(MIN_WIDTH, MIN_HEIGHT);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    InitWindow(DEFAULT_WIDTH, DEFAULT_HEIGHT, TITLE);
     SetTargetFPS(30);
 
     while (!WindowShouldClose()) {
+        if (IsWindowResized()) {
+            width = GetScreenWidth();
+            height = GetScreenHeight();
+
+            inner_width = width - 2 * HOR_PADDING;
+            inner_height = height - TOP_PADDING - BOT_PADDING;
+        }
+
         // Data
+
         if (is_child_running) {
             if (read_entries(&entries, input_fd) != 0) {
                 int status;
@@ -807,19 +816,18 @@ int main(void) {
             if (entries.length == 0) continue;
 
             min_ktime_ns = entries.data[0].ktime_ns;
-            max_ktime_ns = entries.data[entries.length - 1].ktime_ns;
-            ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) INNER_WIDTH);
-
             min_time_s = entries.data[0].time_s;
-            max_time_s = entries.data[entries.length - 1].time_s;
-            time_per_px = (max_time_s - min_time_s) / ((double) INNER_WIDTH);
-
-            // Updates max values
-            group_entries(&max_latency_ns, &max_preempts, &cgroups, entries);
-
             // Min latency and preemptions are assumed to be 0
-            latency_per_px = max_latency_ns / ((double) INNER_HEIGHT);
-            preempts_per_px = max_preempts / ((double) INNER_HEIGHT);
+
+            max_time_s = entries.data[entries.length - 1].time_s;
+
+            // Updates max ktime, latency, preempts values
+            group_entries(&cgroups, entries);
+
+            ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) inner_width);
+            time_per_px = (max_time_s - min_time_s) / ((double) inner_width);
+            latency_per_px = max_latency_ns / ((double) inner_height);
+            preempts_per_px = max_preempts / ((double) inner_height);
         }
 
         // Controls
@@ -859,13 +867,10 @@ int main(void) {
         ClearBackground(BACKGROUND);
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
-        int x_axis_max_y = draw_x_axis(x_offset, x_scale, min_time_s, max_time_s, min_ktime_ns, max_ktime_ns,
-                                       time_per_px, ktime_per_px);
-        draw_y_axis(latency_y_scale, latency_per_px, preempts_y_scale, preempts_per_px);
+        int x_axis_max_y = draw_x_axis();
+        draw_y_axis();
         draw_legend(cgroups);
-        draw_graph(bar_graph, draw_latency, draw_preempts, cgroups, x_offset, x_scale, latency_y_scale,
-                   preempts_y_scale, min_ktime_ns, max_ktime_ns, ktime_per_px, latency_per_px,
-                   preempts_per_px);  // collects stats
+        draw_graph(cgroups);  // collects stats
         draw_stats(x_axis_max_y, cgroups, cgroup_names);
 
         EndDrawing();
