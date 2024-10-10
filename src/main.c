@@ -800,9 +800,9 @@ int main(void) {
     CgroupVec cgroups = {0};
 
     SetTraceLogLevel(LOG_WARNING);
-    SetWindowMinSize(MIN_WIDTH, MIN_HEIGHT);
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(DEFAULT_WIDTH, DEFAULT_HEIGHT, TITLE);
+    SetWindowMinSize(MIN_WIDTH, MIN_HEIGHT);
     SetTargetFPS(30);
 
     while (!WindowShouldClose()) {
