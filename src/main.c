@@ -74,11 +74,13 @@ static const float Y_SCALE_SPEED = 1.07f;
 static const float MIN_Y_SCALE = 0.75f;
 static const int MIN_NUMBER_OF_POINTS_VISIBLE = 4;
 
-// Buffers
+// Cgroup path
 static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 #define PATH_BUFFER_SIZE 4096
+
+// Global buffer for temp snprintf-ing
 #define BUFFER_SIZE 256
-static char buffer[BUFFER_SIZE];  // global temp buffer for snprintf-ing
+static char buffer[BUFFER_SIZE];
 
 // Global variables
 static int width, height, inner_width, inner_height;
@@ -107,6 +109,12 @@ static bool bar_graph = true;
         fprintf(stderr, "\n");        \
         exit(EXIT_FAILURE);           \
     } while (0)
+
+#define temp_snprintf(...)                                            \
+    do {                                                              \
+        int chars = snprintf(buffer, BUFFER_SIZE, __VA_ARGS__);       \
+        if (chars >= BUFFER_SIZE) ERROR("temp buffer is too small."); \
+    } while (0);
 
 #define INITIAL_VECTOR_CAPACITY 16
 
@@ -433,13 +441,13 @@ static int draw_x_axis() {
 
         uint64_t ktime_ns
             = min_ktime_ns + ktime_per_px * i * GRID_SIZE / x_scale + (max_ktime_ns - min_ktime_ns) * x_offset;
-        snprintf(buffer, BUFFER_SIZE, "%lu", ktime_ns / KTIME_SCALING);
+        temp_snprintf("%lu", ktime_ns / KTIME_SCALING);
         Vector2 td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, x - td.x / 2, y, AXIS_DATA_FONT_SIZE, FOREGROUND);
         y += td.y + TEXT_MARGIN;
 
         int time_s = min_time_s + time_per_px * i * GRID_SIZE / x_scale + (max_time_s - min_time_s) * x_offset;
-        snprintf(buffer, BUFFER_SIZE, "%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
+        temp_snprintf("%d:%02d:%02d", (time_s / 3600) % 24, (time_s / 60) % 60, time_s % 60);
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, x - td.x / 2, y, AXIS_DATA_FONT_SIZE, FOREGROUND);
         y += td.y + TEXT_MARGIN;
@@ -451,7 +459,7 @@ static int draw_x_axis() {
 }
 
 static void draw_y_axis() {
-    snprintf(buffer, BUFFER_SIZE, "Latency (%s)", LATENCY_DISPLAY_UNITS);
+    temp_snprintf("Latency (%s)", LATENCY_DISPLAY_UNITS);
     Vector2 td = MeasureText2(buffer, AXIS_LABEL_FONT_SIZE);
     DrawText(buffer, HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE, FOREGROUND);
 
@@ -464,12 +472,12 @@ static void draw_y_axis() {
         DrawLine(HOR_PADDING, y, width - HOR_PADDING, y, GRID_COLOR);
 
         uint64_t latency_ns = latency_per_px * i * GRID_SIZE / latency_y_scale;
-        snprintf(buffer, BUFFER_SIZE, "%lu", latency_ns / LATENCY_DISPLAY_SCALING);
+        temp_snprintf("%lu", latency_ns / LATENCY_DISPLAY_SCALING);
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
 
         uint32_t preempts = preempts_per_px * i * GRID_SIZE / preempts_y_scale;
-        snprintf(buffer, BUFFER_SIZE, "%u", preempts);
+        temp_snprintf("%u", preempts);
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, width - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
     }
@@ -509,7 +517,7 @@ static void draw_legend(CgroupVec cgroups) {
             }
         }
 
-        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup->id);
+        temp_snprintf("%lu", cgroup->id);
         Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
         DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroup->color);
         x += td.x + LEGEND_PADDING;
@@ -567,7 +575,6 @@ static void draw_graph(CgroupVec cgroups) {
 
         double npx, npy, px, py;
 
-        // TODO: simplify/refactor:
         if (draw_latency) {
             // Reset stats
             cgroup->min_latency_ns = UINT64_MAX;
@@ -656,42 +663,40 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
-        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
+        temp_snprintf("%lu", cgroup.id);
         id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-        snprintf(buffer, BUFFER_SIZE, "%s", get_cgroup_name(cgroup_names, cgroup.id));
+        temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         name_column_width = MAX(name_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         if (cgroup.latency_count > 0) {
-            snprintf(buffer, BUFFER_SIZE, "%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING,
-                     LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
             min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            snprintf(buffer, BUFFER_SIZE, "%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING,
-                     LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
             max_latency_column_width = MAX(max_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            snprintf(buffer, BUFFER_SIZE, "%lu%s",
-                     cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING,
+                          LATENCY_DISPLAY_UNITS);
             avg_latency_column_width = MAX(avg_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
         } else {
-            snprintf(buffer, BUFFER_SIZE, "null");
+            temp_snprintf("null");
             min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
             max_latency_column_width = MAX(max_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
             avg_latency_column_width = MAX(avg_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
         }
 
         if (cgroup.preempts_count > 0) {
-            snprintf(buffer, BUFFER_SIZE, "%u", cgroup.min_preempts);
+            temp_snprintf("%u", cgroup.min_preempts);
             min_preempts_column_width = MAX(min_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            snprintf(buffer, BUFFER_SIZE, "%u", cgroup.max_preempts);
+            temp_snprintf("%u", cgroup.max_preempts);
             max_preempts_column_width = MAX(max_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.total_preempts / cgroup.preempts_count);
+            temp_snprintf("%lu", cgroup.total_preempts / cgroup.preempts_count);
             avg_preempts_column_width = MAX(avg_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
         } else {
-            snprintf(buffer, BUFFER_SIZE, "null");
+            temp_snprintf("null");
             min_preempts_column_width = MAX(min_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
             max_preempts_column_width = MAX(max_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
             avg_preempts_column_width = MAX(avg_preempts_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
@@ -722,43 +727,41 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_visible || !cgroup.is_enabled) continue;
 
-        snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.id);
+        temp_snprintf("%lu", cgroup.id);
         Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
         DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
 
-        snprintf(buffer, BUFFER_SIZE, "%s", get_cgroup_name(cgroup_names, cgroup.id));
+        temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         DrawText(buffer, name_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
         if (cgroup.latency_count > 0) {
-            snprintf(buffer, BUFFER_SIZE, "%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING,
-                     LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
             DrawText(buffer, min_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            snprintf(buffer, BUFFER_SIZE, "%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING,
-                     LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
             DrawText(buffer, max_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            snprintf(buffer, BUFFER_SIZE, "%lu%s",
-                     cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_snprintf("%lu%s", cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING,
+                          LATENCY_DISPLAY_UNITS);
             DrawText(buffer, avg_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
         } else {
-            snprintf(buffer, BUFFER_SIZE, "null");
+            temp_snprintf("null");
             DrawText(buffer, min_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
             DrawText(buffer, max_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
             DrawText(buffer, avg_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
         }
 
         if (cgroup.preempts_count > 0) {
-            snprintf(buffer, BUFFER_SIZE, "%u", cgroup.min_preempts);
+            temp_snprintf("%u", cgroup.min_preempts);
             DrawText(buffer, min_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            snprintf(buffer, BUFFER_SIZE, "%u", cgroup.max_preempts);
+            temp_snprintf("%u", cgroup.max_preempts);
             DrawText(buffer, max_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            snprintf(buffer, BUFFER_SIZE, "%lu", cgroup.total_preempts / cgroup.preempts_count);
+            temp_snprintf("%lu", cgroup.total_preempts / cgroup.preempts_count);
             DrawText(buffer, avg_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
         } else {
-            snprintf(buffer, BUFFER_SIZE, "null");
+            temp_snprintf("null");
             DrawText(buffer, min_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
             DrawText(buffer, max_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
             DrawText(buffer, avg_preempts_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
