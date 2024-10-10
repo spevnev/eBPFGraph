@@ -64,7 +64,7 @@ static const Color COLORS[]
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Data processing
-static const size_t CGROUP_MIN_POINTS = 50;
+static const size_t CGROUP_MIN_POINTS = 30;
 static const uint64_t CGROUP_BATCHING_TIME_NS = 100000000;  // 100ms
 
 // Controls
@@ -496,43 +496,54 @@ static void draw_legend(CgroupVec cgroups) {
     }
 }
 
-static void draw_graph_line(double px, double py, double x, double y, Color color) {
-    double rpx = px;
-    double rpy = py;
-    double rx = x;
-    double ry = y;
+// TODO: if batch_time is high, you can see the point moving (ugly!)
+static void draw_graph_line(bool bar_graph, double px, double py, double x, double y, Color color) {
+    if (bar_graph) {
+        double rpx = HOR_PADDING + MAX(px, 0);
+        double rx = MIN(HOR_PADDING + x, WIDTH - HOR_PADDING);
+        double rpy = HEIGHT - BOT_PADDING - MIN(py, INNER_HEIGHT);
+        double ry = HEIGHT - BOT_PADDING - MIN(y, INNER_HEIGHT);
 
-    if (rpx < 0) {
-        assert(x != px);
-        double k = px / ((double) (px - x));
-        rpx = 0;
-        rpy = py + (y - py) * k;
-    }
-    if (rx > INNER_WIDTH) {
-        assert(x != px);
-        double k = (x - INNER_WIDTH) / ((double) (x - px));
-        rx = INNER_WIDTH;
-        ry = py + (y - py) * (1.0f - k);
-    }
-    if (rpy > INNER_HEIGHT) {
-        assert(y != py);
-        double k = (py - INNER_HEIGHT) / ((double) (py - y));
-        rpx = px + (x - px) * k;
-        rpy = INNER_HEIGHT;
-    }
-    if (ry > INNER_HEIGHT) {
-        assert(y != py);
-        double k = (y - INNER_HEIGHT) / ((double) (y - py));
-        rx = px + (x - px) * (1.0f - k);
-        ry = INNER_HEIGHT;
-    }
+        if (py <= INNER_HEIGHT) DrawLine(rpx, rpy, rx, rpy, color);
+        if (x <= INNER_WIDTH) DrawLine(rx, rpy, rx, ry, color);
+    } else {
+        double rpx = px;
+        double rpy = py;
+        double rx = x;
+        double ry = y;
 
-    DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry, color);
+        if (rpx < 0) {
+            assert(x != px);
+            double k = px / ((double) (px - x));
+            rpx = 0;
+            rpy = py + (y - py) * k;
+        }
+        if (rx > INNER_WIDTH) {
+            assert(x != px);
+            double k = (x - INNER_WIDTH) / ((double) (x - px));
+            rx = INNER_WIDTH;
+            ry = py + (y - py) * (1.0f - k);
+        }
+        if (rpy > INNER_HEIGHT) {
+            assert(y != py);
+            double k = (py - INNER_HEIGHT) / ((double) (py - y));
+            rpx = px + (x - px) * k;
+            rpy = INNER_HEIGHT;
+        }
+        if (ry > INNER_HEIGHT) {
+            assert(y != py);
+            double k = (y - INNER_HEIGHT) / ((double) (y - py));
+            rx = px + (x - px) * (1.0f - k);
+            ry = INNER_HEIGHT;
+        }
+
+        DrawLine(HOR_PADDING + rpx, HEIGHT - BOT_PADDING - rpy, HOR_PADDING + rx, HEIGHT - BOT_PADDING - ry, color);
+    }
 }
 
-static void draw_graph(bool draw_latency, bool draw_preempts, CgroupVec cgroups, double x_offset, double x_scale,
-                       double latency_y_scale, double preempts_y_scale, uint64_t min_ktime_ns, uint64_t max_ktime_ns,
-                       double ktime_per_px, double latency_per_px, double preempts_per_px) {
+static void draw_graph(bool bar_graph, bool draw_latency, bool draw_preempts, CgroupVec cgroups, double x_offset,
+                       double x_scale, double latency_y_scale, double preempts_y_scale, uint64_t min_ktime_ns,
+                       uint64_t max_ktime_ns, double ktime_per_px, double latency_per_px, double preempts_per_px) {
     for (size_t i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
@@ -564,7 +575,7 @@ static void draw_graph(bool draw_latency, bool draw_preempts, CgroupVec cgroups,
                 if (x > INNER_WIDTH && px > INNER_WIDTH) break;
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
 
-                draw_graph_line(px, py, x, y, cgroup->color);
+                draw_graph_line(bar_graph, px, py, x, y, cgroup->color);
 
                 cgroup->min_latency_ns = MIN(cgroup->min_latency_ns, latency);
                 cgroup->max_latency_ns = MAX(cgroup->max_latency_ns, latency);
@@ -598,7 +609,7 @@ static void draw_graph(bool draw_latency, bool draw_preempts, CgroupVec cgroups,
                 if (y > INNER_HEIGHT && py > INNER_HEIGHT) continue;
 
                 Vector3 hsv = ColorToHSV(cgroup->color);
-                draw_graph_line(px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
+                draw_graph_line(bar_graph, px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
 
                 cgroup->min_preempts = MIN(cgroup->min_preempts, point.count);
                 cgroup->max_preempts = MAX(cgroup->max_preempts, point.count);
@@ -771,6 +782,7 @@ int main(void) {
 
     bool draw_latency = true;
     bool draw_preempts = true;
+    bool bar_graph = true;
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIDTH, HEIGHT, TITLE);
@@ -839,6 +851,8 @@ int main(void) {
         if (IsKeyPressed(KEY_Z)) draw_latency = !draw_latency;
         if (IsKeyPressed(KEY_X)) draw_preempts = !draw_preempts;
 
+        if (IsKeyPressed(KEY_F)) bar_graph = !bar_graph;
+
         // Drawing
 
         BeginDrawing();
@@ -849,8 +863,9 @@ int main(void) {
                                        time_per_px, ktime_per_px);
         draw_y_axis(latency_y_scale, latency_per_px, preempts_y_scale, preempts_per_px);
         draw_legend(cgroups);
-        draw_graph(draw_latency, draw_preempts, cgroups, x_offset, x_scale, latency_y_scale, preempts_y_scale,
-                   min_ktime_ns, max_ktime_ns, ktime_per_px, latency_per_px, preempts_per_px);  // collects stats
+        draw_graph(bar_graph, draw_latency, draw_preempts, cgroups, x_offset, x_scale, latency_y_scale,
+                   preempts_y_scale, min_ktime_ns, max_ktime_ns, ktime_per_px, latency_per_px,
+                   preempts_per_px);  // collects stats
         draw_stats(x_axis_max_y, cgroups, cgroup_names);
 
         EndDrawing();
