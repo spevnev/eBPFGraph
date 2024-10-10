@@ -600,6 +600,7 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_latency_ns += latency;
                 cgroup->latency_count++;
             }
+            if (px < inner_width) draw_graph_line(px, py, inner_width, py, cgroup->color);
         }
 
         if (draw_preempts) {
@@ -608,6 +609,9 @@ static void draw_graph(CgroupVec cgroups) {
             cgroup->max_preempts = 0;
             cgroup->total_preempts = 0;
             cgroup->preempts_count = 0;
+
+            Vector3 hsv = ColorToHSV(cgroup->color);
+            Color preempt_color = ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f);
 
             px = -1;
             py = -1;
@@ -626,14 +630,14 @@ static void draw_graph(CgroupVec cgroups) {
                 if (x > inner_width && px > inner_width) break;
                 if (y > inner_height && py > inner_width) continue;
 
-                Vector3 hsv = ColorToHSV(cgroup->color);
-                draw_graph_line(px, py, x, y, ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f));
+                draw_graph_line(px, py, x, y, preempt_color);
 
                 cgroup->min_preempts = MIN(cgroup->min_preempts, point.count);
                 cgroup->max_preempts = MAX(cgroup->max_preempts, point.count);
                 cgroup->total_preempts += point.count;
                 cgroup->preempts_count++;
             }
+            if (px < inner_width) draw_graph_line(px, py, inner_width, py, preempt_color);
         }
     }
 }
