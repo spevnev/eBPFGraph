@@ -208,6 +208,18 @@ static void collect_cgroup_names(CgroupNameVec *cgroup_names, char *path) {
     closedir(dir);
 }
 
+static const char *get_cgroup_name(CgroupNameVec cgroup_names, uint64_t id) {
+    const char *name = NULL;
+    for (size_t j = 0; j < cgroup_names.length; j++) {
+        if (cgroup_names.data[j].id == id) {
+            name = cgroup_names.data[j].name;
+            break;
+        }
+    }
+    assert(name != NULL);  // TODO: this is possible if cgroup was created after indexing them -> reindex
+    return name;
+}
+
 static void start_ebpf(int *ret_read_fd, pid_t *child) {
     int fds[2];
     if (pipe(fds) == -1) ERROR("unable to create pipe.");
@@ -441,18 +453,6 @@ static void draw_y_axis(double latency_y_scale, double latency_per_px, double pr
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, WIDTH - HOR_PADDING + TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
     }
-}
-
-static const char *get_cgroup_name(CgroupNameVec cgroup_names, uint64_t id) {
-    const char *name = NULL;
-    for (size_t j = 0; j < cgroup_names.length; j++) {
-        if (cgroup_names.data[j].id == id) {
-            name = cgroup_names.data[j].name;
-            break;
-        }
-    }
-    assert(name != NULL);  // TODO: this is possible if cgroup was created after indexing them -> reindex
-    return name;
 }
 
 static void draw_legend(CgroupVec cgroups) {
