@@ -840,12 +840,12 @@ int main(void) {
 
             // Updates max ktime, latency, preempts values
             group_entries(&cgroups, entries);
-
-            ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) inner_width);
-            time_per_px = (max_time_s - min_time_s) / ((double) inner_width);
-            latency_per_px = max_latency_ns / ((double) inner_height);
-            preempts_per_px = max_preempts / ((double) inner_height);
         }
+
+        ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) inner_width);
+        time_per_px = (max_time_s - min_time_s) / ((double) inner_width);
+        latency_per_px = max_latency_ns / ((double) inner_height);
+        preempts_per_px = max_preempts / ((double) inner_height);
 
         // Controls
 
