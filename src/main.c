@@ -27,7 +27,7 @@ static const int DEFAULT_HEIGHT = 1000;
 // Graph
 static const int HOR_PADDING = 60;
 static const int TOP_PADDING = 75;
-static const int BOT_PADDING = 250;
+static const float BOT_PADDING_PERCENT = 0.34f;  // The rest is graph
 static const int GRID_SIZE = 60;
 
 // Units
@@ -83,7 +83,7 @@ static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 static char buffer[BUFFER_SIZE];
 
 // Global variables
-static int width, height, inner_width, inner_height;
+static int width, height, inner_width, inner_height, bot_padding;
 static double x_offset = 0.0f;
 static double x_scale = 1.0f;
 static double latency_y_scale = 0.95f;
@@ -448,9 +448,9 @@ static int draw_x_axis() {
     int max_y = 0;
     for (int i = 0; i <= inner_width / GRID_SIZE; i++) {
         int x = i * GRID_SIZE + HOR_PADDING;
-        int y = height - BOT_PADDING + TEXT_MARGIN;
+        int y = height - bot_padding + TEXT_MARGIN;
 
-        DrawLine(x, TOP_PADDING, x, height - BOT_PADDING, GRID_COLOR);
+        DrawLine(x, TOP_PADDING, x, height - bot_padding, GRID_COLOR);
 
         uint64_t ktime_ns
             = min_ktime_ns + ktime_per_px * i * GRID_SIZE / x_scale + (max_ktime_ns - min_ktime_ns) * x_offset;
@@ -480,7 +480,7 @@ static void draw_y_axis() {
              FOREGROUND);
 
     for (int i = 0; i <= inner_height / GRID_SIZE; i++) {
-        int y = height - BOT_PADDING - GRID_SIZE * i;
+        int y = height - bot_padding - GRID_SIZE * i;
         DrawLine(HOR_PADDING, y, width - HOR_PADDING, y, GRID_COLOR);
 
         uint64_t latency_ns = latency_per_px * i * GRID_SIZE / latency_y_scale;
@@ -540,8 +540,8 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
     if (bar_graph) {
         double rpx = HOR_PADDING + MAX(px, 0);
         double rx = MIN(HOR_PADDING + x, width - HOR_PADDING);
-        double rpy = height - BOT_PADDING - MIN(py, inner_height);
-        double ry = height - BOT_PADDING - MIN(y, inner_height);
+        double rpy = height - bot_padding - MIN(py, inner_height);
+        double ry = height - bot_padding - MIN(y, inner_height);
 
         if (py <= inner_height) DrawLine(rpx, rpy, rx, rpy, color);
         if (x <= inner_width) DrawLine(rx, rpy, rx, ry, color);
@@ -576,7 +576,7 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
             ry = inner_height;
         }
 
-        DrawLine(HOR_PADDING + rpx, height - BOT_PADDING - rpy, HOR_PADDING + rx, height - BOT_PADDING - ry, color);
+        DrawLine(HOR_PADDING + rpx, height - bot_padding - rpy, HOR_PADDING + rx, height - bot_padding - ry, color);
     }
 }
 
@@ -811,7 +811,8 @@ int main(void) {
             height = GetScreenHeight();
 
             inner_width = width - 2 * HOR_PADDING;
-            inner_height = height - TOP_PADDING - BOT_PADDING;
+            inner_height = (height - TOP_PADDING) * (1.0f - BOT_PADDING_PERCENT);
+            bot_padding = (height - TOP_PADDING) * BOT_PADDING_PERCENT;
         }
 
         // Data
