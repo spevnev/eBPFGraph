@@ -30,10 +30,10 @@ static const int TOP_PADDING = 75;
 static const int BOT_PADDING = 250;
 static const int GRID_SIZE = 60;
 
-// Unit scaling/conversion
-static const char *LATENCY_DISPLAY_UNITS = "ms";
-static const int LATENCY_DISPLAY_SCALING = 1000000;  // ns -> ms
-static const int KTIME_SCALING = 1000000;            // ns -> ms
+// Units
+static const int NS_IN_US = 1000;
+static const int NS_IN_MS = 1000000;
+static const int KTIME_SCALING = 1000000;  // ns -> ms
 
 // Axes
 static const int AXIS_LABEL_FONT_SIZE = 14;
@@ -436,6 +436,14 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
     }
 }
 
+static void temp_print_scaled_latency(uint64_t latency_ns) {
+    if (latency_ns >= NS_IN_MS) {
+        temp_snprintf("%lums", latency_ns / NS_IN_MS);
+    } else {
+        temp_snprintf("%luus", latency_ns / NS_IN_US);
+    }
+}
+
 static int draw_x_axis() {
     int max_y = 0;
     for (int i = 0; i <= inner_width / GRID_SIZE; i++) {
@@ -464,9 +472,8 @@ static int draw_x_axis() {
 }
 
 static void draw_y_axis() {
-    temp_snprintf("Latency (%s)", LATENCY_DISPLAY_UNITS);
-    Vector2 td = MeasureText2(buffer, AXIS_LABEL_FONT_SIZE);
-    DrawText(buffer, HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE, FOREGROUND);
+    Vector2 td = MeasureText2("Latency", AXIS_LABEL_FONT_SIZE);
+    DrawText("Latency", HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE, FOREGROUND);
 
     td = MeasureText2("Preemptions", AXIS_LABEL_FONT_SIZE);
     DrawText("Preemptions", width - HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE,
@@ -477,7 +484,7 @@ static void draw_y_axis() {
         DrawLine(HOR_PADDING, y, width - HOR_PADDING, y, GRID_COLOR);
 
         uint64_t latency_ns = latency_per_px * i * GRID_SIZE / latency_y_scale;
-        temp_snprintf("%lu", latency_ns / LATENCY_DISPLAY_SCALING);
+        temp_print_scaled_latency(latency_ns);
         td = MeasureText2(buffer, AXIS_DATA_FONT_SIZE);
         DrawText(buffer, HOR_PADDING - td.x - TEXT_MARGIN, y - td.y / 2, AXIS_DATA_FONT_SIZE, FOREGROUND);
 
@@ -675,14 +682,13 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
         name_column_width = MAX(name_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         if (cgroup.latency_count > 0) {
-            temp_snprintf("%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.min_latency_ns);
             min_latency_column_width = MAX(min_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            temp_snprintf("%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.max_latency_ns);
             max_latency_column_width = MAX(max_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
-            temp_snprintf("%lu%s", cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING,
-                          LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.total_latency_ns / cgroup.latency_count);
             avg_latency_column_width = MAX(avg_latency_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
         } else {
             temp_snprintf("null");
@@ -740,14 +746,13 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
         DrawText(buffer, name_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
         if (cgroup.latency_count > 0) {
-            temp_snprintf("%lu%s", cgroup.min_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.min_latency_ns);
             DrawText(buffer, min_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            temp_snprintf("%lu%s", cgroup.max_latency_ns / LATENCY_DISPLAY_SCALING, LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.max_latency_ns);
             DrawText(buffer, max_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
 
-            temp_snprintf("%lu%s", cgroup.total_latency_ns / cgroup.latency_count / LATENCY_DISPLAY_SCALING,
-                          LATENCY_DISPLAY_UNITS);
+            temp_print_scaled_latency(cgroup.total_latency_ns / cgroup.latency_count);
             DrawText(buffer, avg_latency_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
         } else {
             temp_snprintf("null");
