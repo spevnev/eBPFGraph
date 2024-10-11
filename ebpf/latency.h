@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+
 #ifndef LATENCY_H
 #define LATENCY_H
 

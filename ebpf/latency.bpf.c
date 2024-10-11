@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+
 #include <vmlinux.h>
 // Don't reorder
 #include <bpf/bpf_core_read.h>
@@ -7,9 +8,8 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-// random values:
 #define MAX_RUNQ_ENTRIES 8192
-#define MAX_EVENT_ENTRIES 8192
+#define MAX_EVENT_ENTRIES 65536
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
