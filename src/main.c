@@ -784,7 +784,6 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_name
 
 int main(void) {
     if (RAYLIB_VERSION_MAJOR != 5) ERROR("the required raylib version is 5.");
-
     if (geteuid() != 0) ERROR("must be ran as root.");
 
     bool is_child_running = true;
@@ -799,6 +798,8 @@ int main(void) {
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
 
+    bool is_size_init = false;
+
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(DEFAULT_WIDTH, DEFAULT_HEIGHT, TITLE);
@@ -806,7 +807,9 @@ int main(void) {
     SetTargetFPS(30);
 
     while (!WindowShouldClose()) {
-        if (IsWindowResized()) {
+        if (!is_size_init || IsWindowResized()) {
+            is_size_init = true;
+
             width = GetScreenWidth();
             height = GetScreenHeight();
 
