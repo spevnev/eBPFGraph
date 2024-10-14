@@ -208,7 +208,7 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
 
-static void collect_cgroup_names(CgroupNameVec *cgroup_names, char *path) {
+static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path) {
     struct stat stats;
     if (stat(path, &stats) == -1) ERROR("unable to stat \"%s\".", path);
 
@@ -234,20 +234,32 @@ static void collect_cgroup_names(CgroupNameVec *cgroup_names, char *path) {
         path[path_len + dir_len] = '/';
         path[path_len + dir_len + 1] = '\0';
 
-        collect_cgroup_names(cgroup_names, path);
+        collect_cgroup_names_rec(cgroup_names, path);
     }
     closedir(dir);
 }
 
-static const char *get_cgroup_name(CgroupNameVec cgroup_names, uint64_t id) {
+static void collect_cgroup_names(CgroupNameVec *cgroup_names) {
+    char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
+    collect_cgroup_names_rec(cgroup_names, path);
+}
+
+static const char *get_cgroup_name(CgroupNameVec *cgroup_names, uint64_t id) {
+    bool can_retry = true;
     const char *name = NULL;
-    for (int j = 0; j < cgroup_names.length; j++) {
-        if (cgroup_names.data[j].id == id) {
-            name = cgroup_names.data[j].name;
+retry:
+    for (int j = 0; j < cgroup_names->length; j++) {
+        if (cgroup_names->data[j].id == id) {
+            name = cgroup_names->data[j].name;
             break;
         }
     }
-    assert(name != NULL);  // TODO: this is possible if cgroup was created after indexing them -> reindex
+    if (name == NULL) {
+        if (!can_retry) ERROR("unable to map cgroup id to name/path.");
+        collect_cgroup_names(cgroup_names);
+        can_retry = false;
+        goto retry;
+    }
     return name;
 }
 
@@ -663,7 +675,7 @@ static void draw_graph(CgroupVec cgroups) {
     }
 }
 
-static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec cgroup_names) {
+static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_names) {
     Vector2 id_column_dim = MeasureText2("Id", STATS_LABEL_FONT_SIZE);
     int id_column_width = id_column_dim.x;
     int name_column_width = MeasureText("Name", STATS_LABEL_FONT_SIZE);
@@ -794,8 +806,7 @@ int main(void) {
     start_ebpf(&input_fd, &child);
 
     CgroupNameVec cgroup_names = {0};
-    char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
-    collect_cgroup_names(&cgroup_names, path);
+    collect_cgroup_names(&cgroup_names);
 
     EntryVec entries = {0};
     CgroupVec cgroups = {0};
@@ -894,7 +905,7 @@ int main(void) {
         draw_y_axis();
         draw_legend(cgroups);
         draw_graph(cgroups);  // collects stats
-        draw_stats(x_axis_max_y, cgroups, cgroup_names);
+        draw_stats(x_axis_max_y, cgroups, &cgroup_names);
 
         EndDrawing();
     }
