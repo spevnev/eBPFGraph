@@ -8,15 +8,25 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-#define MAX_RUNQ_ENTRIES 8192
-#define MAX_EVENT_ENTRIES 262144
+#define RATE_LIMIT_NS 500000  // 500us
+
+#define MAX_RUNQ_ENTRIES 16384
+#define MAX_CGROUP_ENTRIES 8192
+#define MAX_EVENT_ENTRIES 131072
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_RUNQ_ENTRIES);
     __type(key, u32);
     __type(value, u64);
-} runq_enqueued SEC(".maps");
+} runq_tasks SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __uint(max_entries, MAX_CGROUP_ENTRIES);
+    __uint(key_size, sizeof(u64));
+    __uint(value_size, sizeof(u64));
+} cgroup_last_ts SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -35,11 +45,11 @@ u64 get_task_cgroup_id(struct task_struct *task) {
 
 SEC("tp_btf/sched_wakeup")
 int tp_sched_wakeup(u64 *ctx) {
-    struct task_struct *task = (void *) ctx[0];
+    struct task_struct *task = (struct task_struct *) ctx[0];
     u32 pid = task->pid;
     u64 ktime = bpf_ktime_get_ns();
 
-    bpf_map_update_elem(&runq_enqueued, &pid, &ktime, BPF_NOEXIST);
+    bpf_map_update_elem(&runq_tasks, &pid, &ktime, BPF_NOEXIST);
 
     return 0;
 }
@@ -51,31 +61,34 @@ int tp_sched_switch(u64 *ctx) {
     u32 prev_pid = prev->pid;
     u32 next_pid = next->pid;
 
-    // fetch timestamp of when the next task was enqueued
-    u64 *tsp = bpf_map_lookup_elem(&runq_enqueued, &next_pid);
-    if (tsp == NULL) return 0;  // missed enqueue
+    // Get previous timestamp
+    u64 *task_ts = bpf_map_lookup_elem(&runq_tasks, &next_pid);
+    if (task_ts == NULL) return 0;
 
-    // calculate runq latency before deleting the stored timestamp
     u64 now = bpf_ktime_get_ns();
-    u64 runq_latency = now - *tsp;
+    u64 latency = now - *task_ts;
 
-    // delete pid from enqueued map
-    bpf_map_delete_elem(&runq_enqueued, &next_pid);
+    bpf_map_delete_elem(&runq_tasks, &next_pid);
+
+    u64 cgroup_id = get_task_cgroup_id(next);
+
+    // Rate limiting
+    u64 *group_ts = bpf_map_lookup_elem(&cgroup_last_ts, &cgroup_id);
+    if (group_ts != NULL && now - *group_ts < RATE_LIMIT_NS) return 0;
+    bpf_map_update_elem(&cgroup_last_ts, &cgroup_id, &now, BPF_ANY);
+
+    // Submitting event
+    struct runq_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+    if (event == NULL) return 0;
 
     // PID 0 belongs to an idle process, called swapper.
     // Previous cgroup is used to track preemptions, so we skip cases when
     // idle process gets preempted by recording a special value instead.
-    u64 prev_cgroup_id = prev_pid == 0 ? __UINT64_MAX__ : get_task_cgroup_id(prev);
-    u64 cgroup_id = get_task_cgroup_id(next);
-
-    struct runq_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-    if (event) {
-        event->prev_cgroup_id = prev_cgroup_id;
-        event->cgroup_id = cgroup_id;
-        event->runq_latency = runq_latency;
-        event->ktime = now;
-        bpf_ringbuf_submit(event, 0);
-    }
+    event->prev_cgroup_id = prev_pid == 0 ? __UINT64_MAX__ : get_task_cgroup_id(prev);
+    event->cgroup_id = cgroup_id;
+    event->runq_latency = latency;
+    event->ktime = now;
+    bpf_ringbuf_submit(event, 0);
 
     return 0;
 }

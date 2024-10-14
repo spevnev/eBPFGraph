@@ -65,7 +65,7 @@ static const Color COLORS[]
 
 // Data processing
 static const int CGROUP_MIN_ENTRIES = 1000;
-static const uint64_t CGROUP_BATCHING_TIME_NS = 200000000;  // 200ms
+static const uint64_t CGROUP_BATCHING_TIME_NS = 500000000;  // 500ms
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
@@ -294,8 +294,6 @@ static void start_ebpf(int *ret_read_fd, pid_t *child) {
 static const char *time_field(uint32_t *ret_s, const char *ch) {
     assert(ret_s != NULL && ch != NULL);
 
-    while (*ch == ' ') ch++;
-
     char *end = NULL;
 
     long h = strtol(ch, &end, 10);
@@ -315,8 +313,6 @@ static const char *time_field(uint32_t *ret_s, const char *ch) {
 
 static const char *u64_field(uint64_t *ret, const char *ch) {
     assert(ret != NULL && ch != NULL);
-
-    while (*ch == ' ') ch++;
 
     char *end = NULL;
     *ret = strtoull(ch, &end, 10);
