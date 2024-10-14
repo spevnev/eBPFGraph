@@ -411,10 +411,12 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         }
         cgroup->entries_count++;
 
-        if (entries.data[i].prev_cgroup_id == UINT64_MAX) continue;  // ignore swapper preemption
+        // ignore swapper preemption
+        if (entries.data[i].prev_cgroup_id == UINT64_MAX) continue;
+        // ignore preemptions within cgroup
+        if (entries.data[i].prev_cgroup_id == entries.data[i].cgroup_id) continue;
 
-        Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
-        Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
+        Preempt *last_preempt = VECTOR_LAST(&cgroup->preempts);
         if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
             last_preempt->count++;
         } else {
@@ -427,7 +429,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
                 .ktime_ns = entry.ktime_ns,
                 .count = 1,
             };
-            VECTOR_PUSH(&prev_cgroup->preempts, preempt);
+            VECTOR_PUSH(&cgroup->preempts, preempt);
         }
     }
 
