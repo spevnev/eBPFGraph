@@ -62,7 +62,10 @@ int tp_sched_switch(u64 *ctx) {
     // delete pid from enqueued map
     bpf_map_delete_elem(&runq_enqueued, &next_pid);
 
-    u64 prev_cgroup_id = get_task_cgroup_id(prev);
+    // PID 0 belongs to an idle process, called swapper.
+    // Previous cgroup is used to track preemptions, so we skip cases when
+    // idle process gets preempted by recording a special value instead.
+    u64 prev_cgroup_id = prev_pid == 0 ? __UINT64_MAX__ : get_task_cgroup_id(prev);
     u64 cgroup_id = get_task_cgroup_id(next);
 
     struct runq_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);

@@ -388,7 +388,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
     assert(cgroups != NULL);
 
     static int i = 0;
-    while (i < entries.length) {
+    for (; i < entries.length; i++) {
         Entry entry = entries.data[i];
 
         Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup_id);
@@ -411,6 +411,8 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         }
         cgroup->entries_count++;
 
+        if (entries.data[i].prev_cgroup_id == UINT64_MAX) continue;  // ignore swapper preemption
+
         Cgroup *prev_cgroup = get_or_create_cgroup(cgroups, entries.data[i].prev_cgroup_id);
         Preempt *last_preempt = VECTOR_LAST(&prev_cgroup->preempts);
         if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
@@ -427,8 +429,6 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
             };
             VECTOR_PUSH(&prev_cgroup->preempts, preempt);
         }
-
-        i++;
     }
 
     for (int i = 0; i < cgroups->length; i++) {
