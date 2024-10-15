@@ -57,12 +57,10 @@ int tp_sched_wakeup(u64 *ctx) {
 SEC("tp_btf/sched_switch")
 int tp_sched_switch(u64 *ctx) {
     u8 is_preempted = ctx[0];
-    struct task_struct *prev = (struct task_struct *) ctx[1];
     struct task_struct *next = (struct task_struct *) ctx[2];
 
-    u32 prev_pid = prev->pid;
     u32 next_pid = next->pid;
-    u64 cgroup_id = get_task_cgroup_id(next);
+    if (next_pid == 0) return 0;  // ignore kernel tasks (which have PID 0)
 
     // Get previous timestamp
     u64 *task_ts = bpf_map_lookup_elem(&runq_tasks, &next_pid);
@@ -72,6 +70,7 @@ int tp_sched_switch(u64 *ctx) {
     bpf_map_delete_elem(&runq_tasks, &next_pid);
 
     // Rate limit
+    u64 cgroup_id = get_task_cgroup_id(next);
     u64 *group_ts = bpf_map_lookup_elem(&cgroup_last_ts, &cgroup_id);
     if (group_ts != NULL && now - *group_ts < RATE_LIMIT_NS) return 0;
     bpf_map_update_elem(&cgroup_last_ts, &cgroup_id, &now, BPF_ANY);
