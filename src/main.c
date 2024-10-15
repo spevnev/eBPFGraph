@@ -395,14 +395,13 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
     return &cgroups->data[cgroups->length - 1];
 }
 
-static void group_entries(CgroupVec *cgroups, EntryVec entries) {
+static void group_entries(CgroupVec *cgroups, EntryVec *entries) {
     assert(cgroups != NULL);
 
-    static int i = 0;
-    for (; i < entries.length; i++) {
-        Entry entry = entries.data[i];
+    for (int i = 0; i < entries->length; i++) {
+        Entry entry = entries->data[i];
 
-        Cgroup *cgroup = get_or_create_cgroup(cgroups, entries.data[i].cgroup_id);
+        Cgroup *cgroup = get_or_create_cgroup(cgroups, entry.cgroup_id);
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && entry.ktime_ns - last_latency->ktime_ns < CGROUP_BATCHING_TIME_NS) {
             last_latency->total_latency_ns += entry.latency_ns;
@@ -422,9 +421,18 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         }
         cgroup->entries_count++;
 
-        if (!entries.data[i].is_preempted) continue;
-
         Preempt *last_preempt = VECTOR_LAST(&cgroup->preempts);
+        if (!entry.is_preempted) {
+            if (last_preempt && last_preempt->count > 0) {
+                Preempt preempt = {
+                    .ktime_ns = entry.ktime_ns,
+                    .count = 0,
+                };
+                VECTOR_PUSH(&cgroup->preempts, preempt);
+            }
+            continue;
+        }
+
         if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
             last_preempt->count++;
         } else {
@@ -440,6 +448,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
             VECTOR_PUSH(&cgroup->preempts, preempt);
         }
     }
+    entries->length = 0;
 
     for (int i = 0; i < cgroups->length; i++) {
         cgroups->data[i].is_visible = cgroups->data[i].entries_count >= CGROUP_MIN_ENTRIES;
@@ -808,6 +817,7 @@ int main(void) {
     CgroupVec cgroups = {0};
 
     bool is_size_init = false;
+    bool is_min_set = false;
 
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -845,14 +855,17 @@ int main(void) {
             }
             if (entries.length == 0) continue;
 
-            min_ktime_ns = entries.data[0].ktime_ns;
-            min_time_s = entries.data[0].time_s;
-            // Min latency and preemptions are assumed to be 0
+            if (!is_min_set) {
+                is_min_set = true;
+                min_ktime_ns = entries.data[0].ktime_ns;
+                min_time_s = entries.data[0].time_s;
+                // Min latency and preemptions are assumed to be 0
+            }
 
             max_time_s = entries.data[entries.length - 1].time_s;
 
             // Updates max ktime, latency, preempts values
-            group_entries(&cgroups, entries);
+            group_entries(&cgroups, &entries);
         }
 
         ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) inner_width);
