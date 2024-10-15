@@ -6,7 +6,7 @@
 #include <vmlinux.h>
 
 struct runq_event {
-    u64 prev_cgroup_id;
+    u8 is_preempted;
     u64 cgroup_id;
     u64 runq_latency;
     u64 ktime;

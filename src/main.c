@@ -155,9 +155,9 @@ typedef struct {
 VECTOR_TYPEDEF(CgroupNameVec, CgroupName);
 
 typedef struct {
+    uint8_t is_preempted;
     uint32_t time_s;
     uint64_t ktime_ns;
-    uint64_t prev_cgroup_id;
     uint64_t cgroup_id;
     uint64_t latency_ns;
 } Entry;
@@ -356,7 +356,10 @@ static int read_entries(EntryVec *entries, int fd) {
 
             const char *ch = buffer + line_idx;
             ch = time_field(&entry.time_s, ch);
-            ch = u64_field(&entry.prev_cgroup_id, ch);
+            uint64_t is_preempted;
+            ch = u64_field(&is_preempted, ch);
+            assert(is_preempted <= UINT8_MAX);
+            entry.is_preempted = is_preempted;
             ch = u64_field(&entry.cgroup_id, ch);
             ch = u64_field(&entry.latency_ns, ch);
             ch = u64_field(&entry.ktime_ns, ch);
@@ -419,10 +422,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec entries) {
         }
         cgroup->entries_count++;
 
-        // ignore swapper preemption
-        if (entries.data[i].prev_cgroup_id == UINT64_MAX) continue;
-        // ignore preemptions within cgroup
-        if (entries.data[i].prev_cgroup_id == entries.data[i].cgroup_id) continue;
+        if (!entries.data[i].is_preempted) continue;
 
         Preempt *last_preempt = VECTOR_LAST(&cgroup->preempts);
         if (last_preempt != NULL && entry.ktime_ns - last_preempt->ktime_ns < CGROUP_BATCHING_TIME_NS) {
