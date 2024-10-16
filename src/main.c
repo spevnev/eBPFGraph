@@ -28,7 +28,7 @@ static const int DEFAULT_HEIGHT = 1000;
 static const int HOR_PADDING = 60;
 static const int TOP_PADDING = 75;
 static const float BOT_PADDING_PERCENT = 0.34f;  // The rest is graph
-static const int GRID_SIZE = 60;
+static const int GRID_SIZE = 100;
 
 // Units
 static const int NS_IN_US = 1000;
@@ -83,7 +83,7 @@ static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 static char buffer[BUFFER_SIZE];
 
 // Global variables
-static int width, height, inner_width, inner_height, bot_padding;
+static int width, height, graph_width, graph_height, bot_padding;
 static double x_offset = 0.0f;
 static double x_scale = 1.0f;
 static double latency_y_scale = 0.95f;
@@ -465,7 +465,7 @@ static void temp_print_scaled_latency(uint64_t latency_ns) {
 
 static int draw_x_axis() {
     int max_y = 0;
-    for (int i = 0; i <= inner_width / GRID_SIZE; i++) {
+    for (int i = 0; i <= graph_width / GRID_SIZE; i++) {
         int x = i * GRID_SIZE + HOR_PADDING;
         int y = height - bot_padding + TEXT_MARGIN;
 
@@ -498,7 +498,7 @@ static void draw_y_axis() {
     DrawText("Preemptions", width - HOR_PADDING - td.x / 2, TOP_PADDING - td.y - TEXT_MARGIN, AXIS_LABEL_FONT_SIZE,
              FOREGROUND);
 
-    for (int i = 0; i <= inner_height / GRID_SIZE; i++) {
+    for (int i = 0; i <= graph_height / GRID_SIZE; i++) {
         int y = height - bot_padding - GRID_SIZE * i;
         DrawLine(HOR_PADDING, y, width - HOR_PADDING, y, GRID_COLOR);
 
@@ -559,11 +559,11 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
     if (bar_graph) {
         double rpx = HOR_PADDING + MAX(px, 0);
         double rx = MIN(HOR_PADDING + x, width - HOR_PADDING);
-        double rpy = height - bot_padding - MIN(py, inner_height);
-        double ry = height - bot_padding - MIN(y, inner_height);
+        double rpy = height - bot_padding - MIN(py, graph_height);
+        double ry = height - bot_padding - MIN(y, graph_height);
 
-        if (py <= inner_height) DrawLine(rpx, rpy, rx, rpy, color);
-        if (x <= inner_width) DrawLine(rx, rpy, rx, ry, color);
+        if (py <= graph_height) DrawLine(rpx, rpy, rx, rpy, color);
+        if (x <= graph_width) DrawLine(rx, rpy, rx, ry, color);
     } else {
         double rpx = px;
         double rpy = py;
@@ -576,23 +576,23 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
             rpx = 0;
             rpy = py + (y - py) * k;
         }
-        if (rx > inner_width) {
+        if (rx > graph_width) {
             assert(x != px);
-            double k = (x - inner_width) / ((double) (x - px));
-            rx = inner_width;
+            double k = (x - graph_width) / ((double) (x - px));
+            rx = graph_width;
             ry = py + (y - py) * (1.0f - k);
         }
-        if (rpy > inner_height) {
+        if (rpy > graph_height) {
             assert(y != py);
-            double k = (py - inner_height) / ((double) (py - y));
+            double k = (py - graph_height) / ((double) (py - y));
             rpx = px + (x - px) * k;
-            rpy = inner_height;
+            rpy = graph_height;
         }
-        if (ry > inner_height) {
+        if (ry > graph_height) {
             assert(y != py);
-            double k = (y - inner_height) / ((double) (y - py));
+            double k = (y - graph_height) / ((double) (y - py));
             rx = px + (x - px) * (1.0f - k);
-            ry = inner_height;
+            ry = graph_height;
         }
 
         DrawLine(HOR_PADDING + rpx, height - bot_padding - rpy, HOR_PADDING + rx, height - bot_padding - ry, color);
@@ -628,8 +628,8 @@ static void draw_graph(CgroupVec cgroups) {
 
                 if (px == -1) continue;
                 if (x < 0) continue;
-                if (x > inner_width && px > inner_width) break;
-                if (y > inner_height && py > inner_height) continue;
+                if (x > graph_width && px > graph_width) break;
+                if (y > graph_height && py > graph_height) continue;
 
                 draw_graph_line(px, py, x, y, cgroup->color);
 
@@ -638,7 +638,7 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_latency_ns += latency;
                 cgroup->latency_count++;
             }
-            if (px < inner_width) draw_graph_line(px, py, inner_width, py, cgroup->color);
+            if (px < graph_width) draw_graph_line(px, py, graph_width, py, cgroup->color);
         }
 
         if (draw_preempts) {
@@ -665,8 +665,8 @@ static void draw_graph(CgroupVec cgroups) {
 
                 if (px == -1) continue;
                 if (x < 0) continue;
-                if (x > inner_width && px > inner_width) break;
-                if (y > inner_height && py > inner_width) continue;
+                if (x > graph_width && px > graph_width) break;
+                if (y > graph_height && py > graph_width) continue;
 
                 draw_graph_line(px, py, x, y, preempt_color);
 
@@ -675,7 +675,7 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_preempts += point.count;
                 cgroup->preempts_count++;
             }
-            if (px < inner_width) draw_graph_line(px, py, inner_width, py, preempt_color);
+            if (px < graph_width) draw_graph_line(px, py, graph_width, py, preempt_color);
         }
     }
 }
@@ -832,8 +832,8 @@ int main(void) {
             width = GetScreenWidth();
             height = GetScreenHeight();
 
-            inner_width = width - 2 * HOR_PADDING;
-            inner_height = (height - TOP_PADDING) * (1.0f - BOT_PADDING_PERCENT);
+            graph_width = width - 2 * HOR_PADDING;
+            graph_height = (height - TOP_PADDING) * (1.0f - BOT_PADDING_PERCENT);
             bot_padding = (height - TOP_PADDING) * BOT_PADDING_PERCENT;
         }
 
@@ -868,10 +868,10 @@ int main(void) {
             group_entries(&cgroups, &entries);
         }
 
-        ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) inner_width);
-        time_per_px = (max_time_s - min_time_s) / ((double) inner_width);
-        latency_per_px = max_latency_ns / ((double) inner_height);
-        preempts_per_px = max_preempts / ((double) inner_height);
+        ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) graph_width);
+        time_per_px = (max_time_s - min_time_s) / ((double) graph_width);
+        latency_per_px = max_latency_ns / ((double) graph_height);
+        preempts_per_px = max_preempts / ((double) graph_height);
 
         // Controls
 
@@ -907,6 +907,7 @@ int main(void) {
         // Drawing
 
         BeginDrawing();
+
         ClearBackground(BACKGROUND);
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
