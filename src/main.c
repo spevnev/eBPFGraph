@@ -65,7 +65,8 @@ static const Color COLORS[]
 
 // Data processing
 static const int CGROUP_MIN_ENTRIES = 1000;
-static const uint64_t CGROUP_BATCHING_TIME_NS = 500000000;  // 500ms
+static const uint64_t CGROUP_BATCHING_TIME_NS = 500000000;     // 500ms
+static const uint64_t CGROUP_ZERO_POINT_TIME_NS = 1000000000;  // 1s
 
 // Controls
 static const float OFFSET_SPEED = 20.0f;
@@ -407,7 +408,7 @@ static void group_entries(CgroupVec *cgroups, EntryVec *entries) {
             last_latency->total_latency_ns += entry.latency_ns;
             last_latency->count++;
         } else {
-            if (last_latency != NULL) {
+            if (last_latency != NULL && last_latency->count > 0) {
                 max_ktime_ns = MAX(max_ktime_ns, last_latency->ktime_ns);
                 max_latency_ns = MAX(max_latency_ns, last_latency->total_latency_ns / last_latency->count);
             }
@@ -442,7 +443,30 @@ static void group_entries(CgroupVec *cgroups, EntryVec *entries) {
     entries->length = 0;
 
     for (int i = 0; i < cgroups->length; i++) {
-        cgroups->data[i].is_visible = cgroups->data[i].entries_count >= CGROUP_MIN_ENTRIES;
+        Cgroup *cgroup = &cgroups->data[i];
+
+        cgroup->is_visible = cgroup->entries_count >= CGROUP_MIN_ENTRIES;
+
+        Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
+        if (last_latency != NULL && last_latency->count > 0 && last_latency->ktime_ns < max_ktime_ns
+            && max_ktime_ns - last_latency->ktime_ns > CGROUP_ZERO_POINT_TIME_NS) {
+            Latency latency = {
+                .ktime_ns = max_ktime_ns,
+                .total_latency_ns = 0,
+                .count = 0,
+            };
+            VECTOR_PUSH(&cgroup->latencies, latency);
+        }
+
+        Preempt *last_preempt = VECTOR_LAST(&cgroup->preempts);
+        if (last_preempt != NULL && last_preempt->count > 0 && last_preempt->ktime_ns < max_ktime_ns
+            && max_ktime_ns - last_preempt->ktime_ns > CGROUP_ZERO_POINT_TIME_NS) {
+            Preempt preempt = {
+                .ktime_ns = max_ktime_ns,
+                .count = 0,
+            };
+            VECTOR_PUSH(&cgroup->preempts, preempt);
+        }
     }
 }
 
@@ -595,8 +619,6 @@ static void draw_graph(CgroupVec cgroups) {
         Cgroup *cgroup = &cgroups.data[i];
         if (!cgroup->is_visible || !cgroup->is_enabled) continue;
 
-        double npx, npy, px, py;
-
         if (draw_latency) {
             // Reset stats
             cgroup->min_latency_ns = UINT64_MAX;
@@ -604,11 +626,13 @@ static void draw_graph(CgroupVec cgroups) {
             cgroup->total_latency_ns = 0;
             cgroup->latency_count = 0;
 
-            px = -1;
-            py = -1;
-            for (int j = 0; j < cgroup->latencies.length - 1; j++, px = npx, py = npy) {
+            double px = -1;
+            double py = -1;
+            double npx = -1;
+            double npy = -1;
+            for (int j = 0; j < cgroup->latencies.length; j++, px = npx, py = npy) {
                 Latency point = cgroup->latencies.data[j];
-                double latency = point.total_latency_ns / ((double) point.count);
+                double latency = point.count > 0 ? point.total_latency_ns / ((double) point.count) : 0;
 
                 double x = (point.ktime_ns - min_ktime_ns - (max_ktime_ns - min_ktime_ns) * x_offset) / ktime_per_px
                            * x_scale;
@@ -621,6 +645,7 @@ static void draw_graph(CgroupVec cgroups) {
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
                 if (y > graph_height && py > graph_height) continue;
+                if (px > x) continue;
 
                 draw_graph_line(px, py, x, y, cgroup->color);
 
@@ -629,7 +654,7 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_latency_ns += latency;
                 cgroup->latency_count++;
             }
-            if (px < graph_width) draw_graph_line(px, py, graph_width, py, cgroup->color);
+            if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, cgroup->color);
         }
 
         if (draw_preempts) {
@@ -642,9 +667,11 @@ static void draw_graph(CgroupVec cgroups) {
             Vector3 hsv = ColorToHSV(cgroup->color);
             Color preempt_color = ColorFromHSV(hsv.x, hsv.y * 0.5f, hsv.z * 0.5f);
 
-            px = -1;
-            py = -1;
-            for (int j = 0; j < cgroup->preempts.length - 1; j++, px = npx, py = npy) {
+            double px = -1;
+            double py = -1;
+            double npx = -1;
+            double npy = -1;
+            for (int j = 0; j < cgroup->preempts.length; j++, px = npx, py = npy) {
                 Preempt point = cgroup->preempts.data[j];
 
                 double x = (point.ktime_ns - min_ktime_ns - (max_ktime_ns - min_ktime_ns) * x_offset) / ktime_per_px
@@ -658,6 +685,7 @@ static void draw_graph(CgroupVec cgroups) {
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
                 if (y > graph_height && py > graph_width) continue;
+                if (px > x) continue;
 
                 draw_graph_line(px, py, x, y, preempt_color);
 
@@ -666,7 +694,7 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_preempts += point.count;
                 cgroup->preempts_count++;
             }
-            if (px < graph_width) draw_graph_line(px, py, graph_width, py, preempt_color);
+            if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, preempt_color);
         }
     }
 }
@@ -870,9 +898,9 @@ int main(void) {
         if (IsKeyDown(KEY_RIGHT)) x_offset = MIN(x_offset + 1.0f / (x_scale * OFFSET_SPEED), 1.0f - 1.0f / x_scale);
 
         if (IsKeyDown(KEY_EQUAL)) {
-            double max_x_scale
-                = (max_ktime_ns - min_ktime_ns) / ((double) (MIN_NUMBER_OF_POINTS_VISIBLE * CGROUP_BATCHING_TIME_NS));
-            x_scale = MIN(x_scale * X_SCALE_SPEED, max_x_scale);
+            x_scale = MIN(
+                x_scale * X_SCALE_SPEED,
+                (max_ktime_ns - min_ktime_ns) / ((double) (MIN_NUMBER_OF_POINTS_VISIBLE * CGROUP_BATCHING_TIME_NS)));
         }
         if (IsKeyDown(KEY_MINUS)) {
             x_scale = MAX(x_scale / X_SCALE_SPEED, 1.0f);
