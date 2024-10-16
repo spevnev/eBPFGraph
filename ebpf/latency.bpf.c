@@ -56,7 +56,7 @@ int tp_sched_wakeup(u64 *ctx) {
 
 SEC("tp_btf/sched_switch")
 int tp_sched_switch(u64 *ctx) {
-    u8 is_preempted = ctx[0];
+    u8 did_preempt = ctx[0];
     struct task_struct *next = (struct task_struct *) ctx[2];
 
     u32 next_pid = next->pid;
@@ -79,7 +79,7 @@ int tp_sched_switch(u64 *ctx) {
     struct runq_event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
     if (event == NULL) return 0;
 
-    event->is_preempted = is_preempted;
+    event->did_preempt = did_preempt;
     event->cgroup_id = cgroup_id;
     event->runq_latency = latency;
     event->ktime = now;
