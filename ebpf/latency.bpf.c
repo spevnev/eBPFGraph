@@ -8,7 +8,7 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-#define RATE_LIMIT_NS 500000  // 500us
+#define RATE_LIMIT_NS 100
 
 #define MAX_RUNQ_ENTRIES 16384
 #define MAX_CGROUP_ENTRIES 8192
