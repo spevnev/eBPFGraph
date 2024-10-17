@@ -148,6 +148,7 @@ static bool bar_graph = true;
         if ((vec) != NULL && (vec)->data != NULL) free((vec)->data); \
     } while (0)
 
+// TODO: rename
 typedef struct {
     uint64_t id;
     char *name;
