@@ -64,7 +64,6 @@ static const Color COLORS[]
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Data processing
-static const int CGROUP_MIN_ENTRIES = 1000;
 static const uint64_t CGROUP_BATCHING_TIME_NS = 500000000;     // 500ms
 static const uint64_t CGROUP_ZERO_POINT_TIME_NS = 1000000000;  // 1s
 
@@ -78,6 +77,7 @@ static const int MIN_NUMBER_OF_POINTS_VISIBLE = 4;
 // Cgroup path
 static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 #define PATH_BUFFER_SIZE 4096
+static const char *SYSTEMD_CGROUPS[] = {"user.slice", "system.slice", "init.scope"};
 
 // Global buffer for temp snprintf-ing
 #define BUFFER_SIZE 256
@@ -115,7 +115,7 @@ static bool bar_graph = true;
     do {                                                              \
         int chars = snprintf(buffer, BUFFER_SIZE, __VA_ARGS__);       \
         if (chars >= BUFFER_SIZE) ERROR("temp buffer is too small."); \
-    } while (0);
+    } while (0)
 
 #define INITIAL_VECTOR_CAPACITY 16
 
@@ -151,6 +151,7 @@ static bool bar_graph = true;
 typedef struct {
     uint64_t id;
     char *name;
+    bool is_systemd;
 } CgroupName;
 
 VECTOR_TYPEDEF(CgroupNameVec, CgroupName);
@@ -182,10 +183,11 @@ VECTOR_TYPEDEF(PreemptVec, Preempt);
 
 typedef struct {
     bool is_enabled;
-    bool is_visible;
 
+    bool is_systemd;
     uint64_t id;
     Color color;
+
     uint32_t entries_count;
 
     LatencyVec latencies;
@@ -209,13 +211,14 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
 
-static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path) {
+static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path, bool is_systemd) {
     struct stat stats;
     if (stat(path, &stats) == -1) ERROR("unable to stat \"%s\".", path);
 
     CgroupName cgroup = {
         .id = stats.st_ino,
         .name = strdup(path + CGROUP_PATH_PREFIX_LENGTH),
+        .is_systemd = is_systemd,
     };
     VECTOR_PUSH(cgroup_names, cgroup);
 
@@ -235,33 +238,49 @@ static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path) {
         path[path_len + dir_len] = '/';
         path[path_len + dir_len + 1] = '\0';
 
-        collect_cgroup_names_rec(cgroup_names, path);
+        bool is_dir_systemd = is_systemd;
+        for (size_t i = 0; i < sizeof(SYSTEMD_CGROUPS) / sizeof(*SYSTEMD_CGROUPS) && !is_dir_systemd; i++) {
+            if (strcmp(dirent->d_name, SYSTEMD_CGROUPS[i]) == 0) is_dir_systemd = true;
+        }
+        collect_cgroup_names_rec(cgroup_names, path, is_dir_systemd);
     }
     closedir(dir);
 }
 
 static void collect_cgroup_names(CgroupNameVec *cgroup_names) {
+    cgroup_names->length = 0;
     char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
-    collect_cgroup_names_rec(cgroup_names, path);
+    collect_cgroup_names_rec(cgroup_names, path, false);
 }
 
 static const char *get_cgroup_name(CgroupNameVec *cgroup_names, uint64_t id) {
+    if (id == UINT64_MAX) return "systemd services";
+
     bool can_retry = true;
-    const char *name = NULL;
 retry:
-    for (int j = 0; j < cgroup_names->length; j++) {
-        if (cgroup_names->data[j].id == id) {
-            name = cgroup_names->data[j].name;
-            break;
-        }
+    for (int i = 0; i < cgroup_names->length; i++) {
+        if (cgroup_names->data[i].id == id) return cgroup_names->data[i].name;
     }
-    if (name == NULL) {
-        if (!can_retry) ERROR("unable to map cgroup id to name/path.");
-        collect_cgroup_names(cgroup_names);
-        can_retry = false;
-        goto retry;
+
+    if (!can_retry) ERROR("unable to map cgroup id to name/path.");
+    can_retry = false;
+
+    collect_cgroup_names(cgroup_names);
+    goto retry;
+}
+
+static bool is_cgroup_systemd(CgroupNameVec *cgroup_names, uint64_t id) {
+    bool can_retry = true;
+retry:
+    for (int i = 0; i < cgroup_names->length; i++) {
+        if (cgroup_names->data[i].id == id) return cgroup_names->data[i].is_systemd;
     }
-    return name;
+
+    if (!can_retry) ERROR("unable to map cgroup id to name/path.");
+    can_retry = false;
+
+    collect_cgroup_names(cgroup_names);
+    goto retry;
 }
 
 static void start_ebpf(int *ret_read_fd, pid_t *child) {
@@ -375,16 +394,35 @@ static int read_entries(EntryVec *entries, int fd) {
     return 0;
 }
 
-static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
-    for (int j = 0; j < cgroups->length; j++) {
-        if (cgroups->data[j].id == id) {
-            return &cgroups->data[j];
+static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, CgroupNameVec *cgroup_names, uint64_t id) {
+    if (is_cgroup_systemd(cgroup_names, id)) {
+        static int idx = -1;
+
+        if (idx == -1) {
+            Cgroup new_cgroup = {
+                .is_enabled = true,
+                .is_systemd = true,
+                .id = UINT64_MAX,
+                .color = COLORS[cgroups->length % COLORS_LEN],
+                .entries_count = 0,
+                .latencies = {0},
+                .preempts = {0},
+            };
+
+            VECTOR_PUSH(cgroups, new_cgroup);
+            idx = cgroups->length - 1;
         }
+
+        return &cgroups->data[idx];
+    }
+
+    for (int i = 0; i < cgroups->length; i++) {
+        if (cgroups->data[i].id == id) return &cgroups->data[i];
     }
 
     Cgroup new_cgroup = {
         .is_enabled = true,
-        .is_visible = true,
+        .is_systemd = false,
         .id = id,
         .color = COLORS[cgroups->length % COLORS_LEN],
         .entries_count = 0,
@@ -396,13 +434,13 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, uint64_t id) {
     return &cgroups->data[cgroups->length - 1];
 }
 
-static void group_entries(CgroupVec *cgroups, EntryVec *entries) {
+static void group_entries(CgroupVec *cgroups, CgroupNameVec *cgroup_names, EntryVec *entries) {
     assert(cgroups != NULL);
 
     for (int i = 0; i < entries->length; i++) {
         Entry entry = entries->data[i];
 
-        Cgroup *cgroup = get_or_create_cgroup(cgroups, entry.cgroup_id);
+        Cgroup *cgroup = get_or_create_cgroup(cgroups, cgroup_names, entry.cgroup_id);
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && entry.ktime_ns - last_latency->ktime_ns < CGROUP_BATCHING_TIME_NS) {
             last_latency->total_latency_ns += entry.latency_ns;
@@ -444,8 +482,6 @@ static void group_entries(CgroupVec *cgroups, EntryVec *entries) {
 
     for (int i = 0; i < cgroups->length; i++) {
         Cgroup *cgroup = &cgroups->data[i];
-
-        cgroup->is_visible = cgroup->entries_count >= CGROUP_MIN_ENTRIES;
 
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && last_latency->count > 0 && last_latency->ktime_ns < max_ktime_ns
@@ -533,7 +569,6 @@ static void draw_legend(CgroupVec cgroups) {
     int x = HOR_PADDING;
     for (int i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
-        if (!cgroup->is_visible) continue;
 
         Rectangle rec = {
             .x = x,
@@ -563,7 +598,9 @@ static void draw_legend(CgroupVec cgroups) {
             }
         }
 
-        temp_snprintf("%lu", cgroup->id);
+        if (cgroup->is_systemd) temp_snprintf("systemd services");
+        else temp_snprintf("%lu", cgroup->id);
+
         Vector2 td = MeasureText2(buffer, LEGEND_FONT_SIZE);
         DrawText(buffer, x, LEGEND_TOP_MARGIN - td.y / 2, LEGEND_FONT_SIZE, cgroup->color);
         x += td.x + LEGEND_PADDING;
@@ -617,7 +654,7 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
 static void draw_graph(CgroupVec cgroups) {
     for (int i = 0; i < cgroups.length; i++) {
         Cgroup *cgroup = &cgroups.data[i];
-        if (!cgroup->is_visible || !cgroup->is_enabled) continue;
+        if (!cgroup->is_enabled) continue;
 
         if (draw_latency) {
             // Reset stats
@@ -641,18 +678,18 @@ static void draw_graph(CgroupVec cgroups) {
                 npx = x;
                 npy = y;
 
-                if (px == -1) continue;
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
                 if (y > graph_height && py > graph_height) continue;
                 if (px > x) continue;
 
-                draw_graph_line(px, py, x, y, cgroup->color);
-
                 cgroup->min_latency_ns = MIN(cgroup->min_latency_ns, latency);
                 cgroup->max_latency_ns = MAX(cgroup->max_latency_ns, latency);
                 cgroup->total_latency_ns += latency;
                 cgroup->latency_count++;
+
+                if (px == -1) continue;
+                draw_graph_line(px, py, x, y, cgroup->color);
             }
             if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, cgroup->color);
         }
@@ -681,18 +718,18 @@ static void draw_graph(CgroupVec cgroups) {
                 npx = x;
                 npy = y;
 
-                if (px == -1) continue;
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
                 if (y > graph_height && py > graph_width) continue;
                 if (px > x) continue;
 
-                draw_graph_line(px, py, x, y, preempt_color);
-
                 cgroup->min_preempts = MIN(cgroup->min_preempts, point.count);
                 cgroup->max_preempts = MAX(cgroup->max_preempts, point.count);
                 cgroup->total_preempts += point.count;
                 cgroup->preempts_count++;
+
+                if (px == -1) continue;
+                draw_graph_line(px, py, x, y, preempt_color);
             }
             if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, preempt_color);
         }
@@ -711,10 +748,12 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_nam
     int avg_preempts_column_width = MeasureText("Avg preempts", STATS_LABEL_FONT_SIZE);
     for (int i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
-        if (!cgroup.is_visible || !cgroup.is_enabled) continue;
+        if (!cgroup.is_enabled) continue;
 
-        temp_snprintf("%lu", cgroup.id);
-        id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
+        if (!cgroup.is_systemd) {
+            temp_snprintf("%lu", cgroup.id);
+            id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
+        }
 
         temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         name_column_width = MAX(name_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
@@ -772,13 +811,16 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_nam
     DrawText("Avg preempts", avg_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     y += id_column_dim.y + TEXT_MARGIN;
 
+    Vector2 td;
     for (int i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
-        if (!cgroup.is_visible || !cgroup.is_enabled) continue;
+        if (!cgroup.is_enabled) continue;
 
-        temp_snprintf("%lu", cgroup.id);
-        Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
-        DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
+        if (!cgroup.is_systemd) {
+            temp_snprintf("%lu", cgroup.id);
+            td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
+            DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
+        }
 
         temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         DrawText(buffer, name_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
@@ -884,7 +926,7 @@ int main(void) {
             max_time_s = entries.data[entries.length - 1].time_s;
 
             // Updates max ktime, latency, preempts
-            group_entries(&cgroups, &entries);
+            group_entries(&cgroups, &cgroup_names, &entries);
         }
 
         ktime_per_px = (max_ktime_ns - min_ktime_ns) / ((double) graph_width);
