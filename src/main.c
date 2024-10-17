@@ -486,6 +486,8 @@ static void group_entries(CgroupVec *cgroups, CgroupNameVec *cgroup_names, Entry
         Latency *last_latency = VECTOR_LAST(&cgroup->latencies);
         if (last_latency != NULL && last_latency->count > 0 && last_latency->ktime_ns < max_ktime_ns
             && max_ktime_ns - last_latency->ktime_ns > CGROUP_ZERO_POINT_TIME_NS) {
+            max_latency_ns = MAX(max_latency_ns, last_latency->total_latency_ns / last_latency->count);
+
             Latency latency = {
                 .ktime_ns = max_ktime_ns,
                 .total_latency_ns = 0,
@@ -497,6 +499,8 @@ static void group_entries(CgroupVec *cgroups, CgroupNameVec *cgroup_names, Entry
         Preempt *last_preempt = VECTOR_LAST(&cgroup->preempts);
         if (last_preempt != NULL && last_preempt->count > 0 && last_preempt->ktime_ns < max_ktime_ns
             && max_ktime_ns - last_preempt->ktime_ns > CGROUP_ZERO_POINT_TIME_NS) {
+            max_preempts = MAX(max_preempts, last_preempt->count);
+
             Preempt preempt = {
                 .ktime_ns = max_ktime_ns,
                 .count = 0,
@@ -680,7 +684,6 @@ static void draw_graph(CgroupVec cgroups) {
 
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
-                if (y > graph_height && py > graph_height) continue;
                 if (px > x) continue;
 
                 cgroup->min_latency_ns = MIN(cgroup->min_latency_ns, latency);
@@ -688,7 +691,9 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_latency_ns += latency;
                 cgroup->latency_count++;
 
+                if (y > graph_height && py > graph_height) continue;
                 if (px == -1) continue;
+
                 draw_graph_line(px, py, x, y, cgroup->color);
             }
             if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, cgroup->color);
@@ -720,7 +725,6 @@ static void draw_graph(CgroupVec cgroups) {
 
                 if (x < 0) continue;
                 if (x > graph_width && px > graph_width) break;
-                if (y > graph_height && py > graph_width) continue;
                 if (px > x) continue;
 
                 cgroup->min_preempts = MIN(cgroup->min_preempts, point.count);
@@ -728,7 +732,9 @@ static void draw_graph(CgroupVec cgroups) {
                 cgroup->total_preempts += point.count;
                 cgroup->preempts_count++;
 
+                if (y > graph_height && py > graph_width) continue;
                 if (px == -1) continue;
+
                 draw_graph_line(px, py, x, y, preempt_color);
             }
             if (px > 0 && px < graph_width) draw_graph_line(px, py, graph_width, py, preempt_color);
