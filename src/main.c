@@ -64,7 +64,7 @@ static const Color COLORS[]
 #define COLORS_LEN (sizeof(COLORS) / sizeof(*COLORS))
 
 // Data processing
-static const uint64_t CGROUP_BATCHING_TIME_NS = 500000000;     // 500ms
+static const uint64_t CGROUP_BATCHING_TIME_NS = 1000000000;    // 1s
 static const uint64_t CGROUP_ZERO_POINT_TIME_NS = 1000000000;  // 1s
 
 // Controls
@@ -77,7 +77,7 @@ static const int MIN_NUMBER_OF_POINTS_VISIBLE = 4;
 // Cgroup path
 static const int CGROUP_PATH_PREFIX_LENGTH = 14;  // = strlen("/sys/fs/cgroup");
 #define PATH_BUFFER_SIZE 4096
-static const char *SYSTEMD_CGROUPS[] = {"user.slice", "system.slice", "init.scope"};
+static const char *SYSTEMD_CGROUP_NAMES[] = {"system.slice", "session.slice", "app.slice", "init.scope"};
 
 // Global buffer for temp snprintf-ing
 #define BUFFER_SIZE 256
@@ -238,11 +238,12 @@ static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path, bo
         path[path_len + dir_len] = '/';
         path[path_len + dir_len + 1] = '\0';
 
-        bool is_dir_systemd = is_systemd;
-        for (size_t i = 0; i < sizeof(SYSTEMD_CGROUPS) / sizeof(*SYSTEMD_CGROUPS) && !is_dir_systemd; i++) {
-            if (strcmp(dirent->d_name, SYSTEMD_CGROUPS[i]) == 0) is_dir_systemd = true;
+        bool is_cgroup_systemd = is_systemd;
+        for (size_t i = 0; i < sizeof(SYSTEMD_CGROUP_NAMES) / sizeof(*SYSTEMD_CGROUP_NAMES) && !is_cgroup_systemd;
+             i++) {
+            if (strcmp(dirent->d_name, SYSTEMD_CGROUP_NAMES[i]) == 0) is_cgroup_systemd = true;
         }
-        collect_cgroup_names_rec(cgroup_names, path, is_dir_systemd);
+        collect_cgroup_names_rec(cgroup_names, path, is_cgroup_systemd);
     }
     closedir(dir);
 }
@@ -758,8 +759,10 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_nam
 
         if (!cgroup.is_systemd) {
             temp_snprintf("%lu", cgroup.id);
-            id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
+        } else {
+            temp_snprintf("null");
         }
+        id_column_width = MAX(id_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
 
         temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         name_column_width = MAX(name_column_width, MeasureText(buffer, STATS_DATA_FONT_SIZE));
@@ -817,16 +820,17 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_nam
     DrawText("Avg preempts", avg_preempts_column_x, y, STATS_LABEL_FONT_SIZE, FOREGROUND);
     y += id_column_dim.y + TEXT_MARGIN;
 
-    Vector2 td;
     for (int i = 0; i < cgroups.length; i++) {
         Cgroup cgroup = cgroups.data[i];
         if (!cgroup.is_enabled) continue;
 
         if (!cgroup.is_systemd) {
             temp_snprintf("%lu", cgroup.id);
-            td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
-            DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
+        } else {
+            temp_snprintf("null");
         }
+        Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
+        DrawText(buffer, id_column_x, y, STATS_DATA_FONT_SIZE, cgroup.color);
 
         temp_snprintf("%s", get_cgroup_name(cgroup_names, cgroup.id));
         DrawText(buffer, name_column_x, y, STATS_DATA_FONT_SIZE, FOREGROUND);
