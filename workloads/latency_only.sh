@@ -14,13 +14,16 @@ if [ "$(mount -l | grep cgroup2)" = "" ]; then
 fi
 
 # Create cgroup if it doesn't exist
-CGROUP="/sys/fs/cgroup/client"
+CGROUP="/sys/fs/cgroup/throttled_cpu"
 mkdir -p $CGROUP
+
+# Throttle it
+echo "100000 1000000" > $CGROUP/cpu.max
 
 # Add current process to it
 echo $$ > $CGROUP/cgroup.procs
 
+CPUS=$(($(nproc --all) * 2 + 1))
 while true; do
-    curl localhost:3000 > /dev/null 2>&1
-    sleep 0.01s
+    stress -q --cpu $CPUS -t 1
 done

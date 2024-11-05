@@ -13,11 +13,13 @@ if [ "$(mount -l | grep cgroup2)" = "" ]; then
     exit 1
 fi
 
-# Create cgroup if it doesn't exist
-CGROUP="/sys/fs/cgroup/cpu"
-mkdir -p $CGROUP
+DIR=$(dirname $0)
 
-# Add current process to it
-echo $$ > $CGROUP/cgroup.procs
+$DIR/jobs/server.sh &
+for i in $(seq 1 20); do
+    $DIR/jobs/client.sh &
+done
 
-stress --cpu 10
+echo "Press any key to stop the workload"
+read -rsn1
+kill $(jobs -p)
