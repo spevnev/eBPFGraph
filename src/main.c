@@ -15,6 +15,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 // Window
@@ -148,14 +149,13 @@ static bool bar_graph = true;
         if ((vec) != NULL && (vec)->data != NULL) free((vec)->data); \
     } while (0)
 
-// TODO: rename
 typedef struct {
     uint64_t id;
     char *name;
     bool is_systemd;
-} CgroupName;
+} CgroupInfo;
 
-VECTOR_TYPEDEF(CgroupNameVec, CgroupName);
+VECTOR_TYPEDEF(CgroupInfoVec, CgroupInfo);
 
 typedef struct {
     uint8_t did_preempt;
@@ -212,11 +212,11 @@ VECTOR_TYPEDEF(CgroupVec, Cgroup);
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 #define MIN(a, b) ((a) <= (b) ? (a) : (b))
 
-static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path, bool is_systemd) {
+static void collect_cgroup_names_rec(CgroupInfoVec *cgroup_names, char *path, bool is_systemd) {
     struct stat stats;
     if (stat(path, &stats) == -1) ERROR("unable to stat \"%s\".", path);
 
-    CgroupName cgroup = {
+    CgroupInfo cgroup = {
         .id = stats.st_ino,
         .name = strdup(path + CGROUP_PATH_PREFIX_LENGTH),
         .is_systemd = is_systemd,
@@ -249,13 +249,13 @@ static void collect_cgroup_names_rec(CgroupNameVec *cgroup_names, char *path, bo
     closedir(dir);
 }
 
-static void collect_cgroup_names(CgroupNameVec *cgroup_names) {
+static void collect_cgroup_names(CgroupInfoVec *cgroup_names) {
     cgroup_names->length = 0;
     char path[PATH_BUFFER_SIZE] = "/sys/fs/cgroup/";
     collect_cgroup_names_rec(cgroup_names, path, false);
 }
 
-static const char *get_cgroup_name(CgroupNameVec *cgroup_names, uint64_t id) {
+static const char *get_cgroup_name(CgroupInfoVec *cgroup_names, uint64_t id) {
     if (id == UINT64_MAX) return "systemd services";
 
     bool can_retry = true;
@@ -271,7 +271,7 @@ retry:
     goto retry;
 }
 
-static bool is_cgroup_systemd(CgroupNameVec *cgroup_names, uint64_t id) {
+static bool is_cgroup_systemd(CgroupInfoVec *cgroup_names, uint64_t id) {
     bool can_retry = true;
 retry:
     for (int i = 0; i < cgroup_names->length; i++) {
@@ -396,7 +396,7 @@ static int read_entries(EntryVec *entries, int fd) {
     return 0;
 }
 
-static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, CgroupNameVec *cgroup_names, uint64_t id) {
+static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, CgroupInfoVec *cgroup_names, uint64_t id) {
     if (is_cgroup_systemd(cgroup_names, id)) {
         static int idx = -1;
 
@@ -436,7 +436,7 @@ static Cgroup *get_or_create_cgroup(CgroupVec *cgroups, CgroupNameVec *cgroup_na
     return &cgroups->data[cgroups->length - 1];
 }
 
-static void group_entries(CgroupVec *cgroups, CgroupNameVec *cgroup_names, EntryVec *entries) {
+static void group_entries(CgroupVec *cgroups, CgroupInfoVec *cgroup_names, EntryVec *entries) {
     assert(cgroups != NULL);
 
     for (int i = 0; i < entries->length; i++) {
@@ -640,8 +640,7 @@ static void draw_graph_line(double px, double py, double x, double y, Color colo
             rx = graph_width;
             ry = py + (y - py) * (1.0f - k);
         }
-        if (rpy > graph_height) {
-            assert(y != py);
+        if (rpy > graph_height && y != py) {
             double k = (py - graph_height) / ((double) (py - y));
             rpx = px + (x - px) * k;
             rpy = graph_height;
@@ -744,7 +743,7 @@ static void draw_graph(CgroupVec cgroups) {
     }
 }
 
-static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_names) {
+static void draw_stats(int start_y, CgroupVec cgroups, CgroupInfoVec *cgroup_names) {
     Vector2 id_column_dim = MeasureText2("Id", STATS_LABEL_FONT_SIZE);
     int id_column_width = id_column_dim.x;
     int name_column_width = MeasureText("Name", STATS_LABEL_FONT_SIZE);
@@ -873,6 +872,21 @@ static void draw_stats(int start_y, CgroupVec cgroups, CgroupNameVec *cgroup_nam
     }
 }
 
+static void draw_performance_info(bool is_ebpf_running) {
+    int fps = GetFPS();
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    uint32_t time_s = (tm->tm_hour * 60 + tm->tm_min) * 60 + tm->tm_sec;
+    uint32_t time_diff = time_s - max_time_s;
+    if (!is_ebpf_running) time_diff = 0;
+
+    char buffer[32];
+    snprintf(buffer, 32, "%dfps\n%us behind", fps, time_diff);
+
+    Vector2 td = MeasureText2(buffer, STATS_DATA_FONT_SIZE);
+    DrawText(buffer, width - td.x - TEXT_MARGIN, height - td.y - TEXT_MARGIN, STATS_DATA_FONT_SIZE, FOREGROUND);
+}
+
 int main(void) {
     if (RAYLIB_VERSION_MAJOR != 5) ERROR("the required raylib version is 5.");
     if (geteuid() != 0) ERROR("must be ran as root.");
@@ -882,7 +896,7 @@ int main(void) {
     pid_t child;
     start_ebpf(&input_fd, &child);
 
-    CgroupNameVec cgroup_names = {0};
+    CgroupInfoVec cgroup_names = {0};
     collect_cgroup_names(&cgroup_names);
 
     EntryVec entries = {0};
@@ -988,6 +1002,7 @@ int main(void) {
         draw_legend(cgroups);
         draw_graph(cgroups);  // collects stats
         draw_stats(x_axis_max_y, cgroups, &cgroup_names);
+        draw_performance_info(is_child_running);
 
         EndDrawing();
     }
